@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Native build + install of the Morse Micro MM8108 stack on an Ubuntu device
+# (e.g. NVIDIA Jetson) with the USB dongle attached. Unlike the Gateworks
+# cross-build, openssl / libnl / libusb come from the distro, so nothing is
+# built out of tree and everything links dynamically.
+#
+# Installs:
+#   - morse.ko + dot11ah.ko via DKMS (rebuilt automatically on kernel upgrade)
+#   - firmware and BCFs into /lib/firmware/morse, via the DKMS POST_INSTALL hook
+#   - hostapd_s1g, wpa_supplicant_s1g and friends, morse_cli into $BINDIR
+#
+# Usage: morse_micro_install.sh [--uninstall]
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+PACKAGE_NAME=morse
+PACKAGE_VERSION=2.0.0
+BINDIR=${BINDIR:-/usr/local/sbin}
+COUNTRY=${COUNTRY:-US}
+
+as_root() {
+  if [[ $EUID -eq 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+log() { echo "==> $*"; }
+
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
+
+# dkms pulls in the kernel headers meta-package on Ubuntu, but on Jetson the
+# headers come from nvidia-l4t-kernel-headers and are already present.
+APT_DEPS=(
+  dkms
+  build-essential
+  bison
+  flex
+  pkg-config
+  libnl-3-dev
+  libnl-genl-3-dev
+  libnl-route-3-dev
+  libssl-dev
+  libusb-1.0-0-dev
+)
+
+missing=()
+for pkg in "${APT_DEPS[@]}"; do
+  dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed" ||
+    missing+=("$pkg")
+done
+
+if [[ ${#missing[@]} -gt 0 ]]; then
+  log "Installing build dependencies (root required): ${missing[*]}"
+  as_root apt-get update
+  as_root apt-get install -y "${missing[@]}"
+fi
+
+if [[ ! -d /lib/modules/$(uname -r)/build ]]; then
+  >&2 echo "No kernel build tree at /lib/modules/$(uname -r)/build."
+  >&2 echo "Install the headers for the running kernel before continuing"
+  >&2 echo "(Jetson: 'apt install nvidia-l4t-kernel-headers')."
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+
+log "Checking out submodules..."
+git submodule update --init --recursive
+
+# ---------------------------------------------------------------------------
+# Driver (DKMS)
+# ---------------------------------------------------------------------------
+
+# Local fixups to morse_driver are declared as PATCH[#] in dkms.conf rather
+# than applied here: DKMS re-applies them to a fresh copy of the sources on
+# every build, so they survive kernel-upgrade rebuilds and the vendor
+# submodule in this checkout is never dirtied.
+
+# DKMS wants the sources under /usr/src/<name>-<version>. Copy rather than
+# symlink: dkms resolves the tree at build time on every kernel upgrade, and a
+# symlink into a user's home directory is a footgun once that tree moves.
+if dkms status -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" 2>/dev/null | grep -q .; then
+  log "Removing previous DKMS registration of ${PACKAGE_NAME}/${PACKAGE_VERSION}"
+  as_root dkms remove -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" --all || true
+fi
+
+DKMS_SRC=/usr/src/${PACKAGE_NAME}-${PACKAGE_VERSION}
+
+log "Staging driver sources into $DKMS_SRC"
+as_root rm -rf "$DKMS_SRC"
+as_root mkdir -p "$DKMS_SRC"
+as_root cp -a dkms.conf "$DKMS_SRC/"
+as_root cp -a patches "$DKMS_SRC/"
+as_root cp -a morse_driver "$DKMS_SRC/"
+# The POST_INSTALL hook and the firmware it installs have to live in the source
+# tree too: DKMS re-runs the hook from there on every kernel-upgrade
+# autoinstall, long after this script and this checkout are out of the picture.
+as_root install -m 0755 install-firmware.sh "$DKMS_SRC/"
+as_root cp -a morse-firmware "$DKMS_SRC/"
+as_root rm -rf "$DKMS_SRC/morse-firmware/.git"
+# Kernel-upgrade rebuilds run from the staged dkms.conf alone, with none of
+# this script's environment, so $COUNTRY has to be baked into that copy or the
+# compiled-in regdomain silently drifts from /etc/modprobe.d/morse.conf below.
+as_root sed -i -e "s/^\( *CONFIG_MORSE_COUNTRY=\).*\(\\\\\)$/\1$COUNTRY \2/" "$DKMS_SRC/dkms.conf"
+# Drop the submodule's git metadata; only the sources need to survive here,
+# and .git is a file pointing back at this checkout's .git/modules anyway.
+as_root rm -rf "$DKMS_SRC/morse_driver/.git"
+
+log "Building and installing the driver via DKMS"
+as_root dkms add -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
+as_root dkms build -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
+as_root dkms install -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
+
+log "Setting module parameters"
+as_root mkdir -p /etc/modprobe.d
+echo "options morse country=$COUNTRY" | as_root tee /etc/modprobe.d/morse.conf >/dev/null
+
+# ---------------------------------------------------------------------------
+# hostapd_s1g / wpa_supplicant_s1g
+# ---------------------------------------------------------------------------
+
+HOSTAP_CFLAGS="-D_GNU_SOURCE -I$ROOT/morse_cli -Wno-deprecated-declarations -Wno-error=implicit-function-declaration"
+HOSTAP_LIBS="-lnl-3 -lnl-genl-3 -lm -lpthread -lcrypto -lssl"
+
+# Options to flip relative to each component's shipped defconfig. The vendor
+# script collapses these into single backslash-continued strings and then loops
+# over them as if they were arrays, so every sed misses and both daemons get
+# built straight from defconfig; real arrays here.
+#
+# Dropped from the vendor's list: CONFIG_DEBUG_SYSLOG_FACILITY. defconfig:433
+# spells it "#CONFIG_DEBUG_SYSLOG_FACILITY=LOG_DAEMON", which the "=y" sed
+# below cannot match, and CONFIG_DEBUG_SYSLOG is already on at defconfig:431.
+WPA_S_ENABLE=(
+  CONFIG_DRIVER_NL80211_QCA
+  CONFIG_EAP_MD5
+  CONFIG_EAP_MSCHAPV2
+  CONFIG_EAP_TLS
+  CONFIG_EAP_TLSV1_3
+  CONFIG_EAP_PEAP
+  CONFIG_EAP_TTLS
+  CONFIG_EAP_GTC
+  CONFIG_EAP_PWD
+  CONFIG_WPS_ER
+  CONFIG_WPS_REG_DISABLE_OPEN
+  CONFIG_WPS_NFC
+  CONFIG_SAE_PK
+  CONFIG_MESH
+)
+
+# The vendor script lists CONFIG_BGSCAN_SIMPLE in both its enables and its
+# disables. defconfig:642 already has it on, so the enable is a no-op and the
+# disable is the operative one -- hence turning it off here. Move it to
+# WPA_S_ENABLE if you want background scanning for roaming.
+WPA_S_DISABLE=(
+  CONFIG_BGSCAN_SIMPLE
+)
+
+HOSTAPD_DISABLE=()
+
+HOSTAPD_ENABLE=(
+  CONFIG_DRIVER_NL80211_QCA
+  CONFIG_EAP
+  CONFIG_EAP_MD5
+  CONFIG_EAP_EKE
+  CONFIG_EAP_MSCHAPV2
+  CONFIG_EAP_PEAP
+  CONFIG_EAP_TLS
+  CONFIG_EAP_TTLS
+  CONFIG_EAP_GTC
+  CONFIG_EAP_SIM
+  CONFIG_EAP_AKA
+  CONFIG_EAP_AKA_PRIME
+  CONFIG_EAP_PAX
+  CONFIG_EAP_PSK
+  CONFIG_EAP_PWD
+  CONFIG_EAP_SAKE
+  CONFIG_EAP_GPSK
+  CONFIG_EAP_GPSK_SHA256
+  CONFIG_EAP_FAST
+  CONFIG_EAP_TEAP
+  CONFIG_WPS
+  CONFIG_WPS_UPNP
+  CONFIG_WPS_NFC
+  CONFIG_EAP_IKEV2
+  CONFIG_EAP_TNC
+  CONFIG_RADIUS_SERVER
+  CONFIG_SAE
+  CONFIG_SAE_PK
+  CONFIG_TLSV11
+  CONFIG_TLSV12
+)
+
+# $2 and $3 are space-separated option lists (pass arrays as "${arr[*]}").
+write_hostap_config() {
+  local dir=$1 enabled=$2 disabled=$3 opt
+  cp "$dir/defconfig" "$dir/.config"
+  for opt in "${enabled[@]}"; do
+    sed -i -e "s/^#$opt=y/$opt=y/" "$dir/.config"
+  done
+  for opt in "${disabled[@]}"; do
+    sed -i -e "s/^$opt=y/#$opt=y/" "$dir/.config"
+  done
+}
+
+log "Building wpa_supplicant_s1g..."
+write_hostap_config hostap/wpa_supplicant "${WPA_S_ENABLE[*]}" "${WPA_S_DISABLE[*]}"
+make -C hostap/wpa_supplicant clean
+make -j"$(nproc)" -C hostap/wpa_supplicant \
+  CFLAGS="$HOSTAP_CFLAGS" \
+  LIBS="$HOSTAP_LIBS"
+
+log "Building hostapd_s1g..."
+write_hostap_config hostap/hostapd "${HOSTAPD_ENABLE[*]}" "${HOSTAPD_DISABLE[*]-}"
+make -C hostap/hostapd clean
+make -j"$(nproc)" -C hostap/hostapd \
+  CFLAGS="$HOSTAP_CFLAGS" \
+  LIBS="$HOSTAP_LIBS"
+
+# ---------------------------------------------------------------------------
+# morse_cli
+# ---------------------------------------------------------------------------
+
+# With CFLAGS unset the Makefile adds -I${SYSROOT}/usr/include/libnl3 itself,
+# which resolves to the distro headers on a native build.
+log "Building morse_cli..."
+make -C morse_cli clean
+make -j"$(nproc)" -C morse_cli CONFIG_MORSE_TRANS_NL80211=1
+
+# ---------------------------------------------------------------------------
+# Install userspace
+# ---------------------------------------------------------------------------
+
+log "Installing userspace tools into $BINDIR"
+as_root install -d "$BINDIR"
+as_root install -m 0755 -t "$BINDIR" \
+  hostap/wpa_supplicant/wpa_supplicant_s1g \
+  hostap/wpa_supplicant/wpa_cli_s1g \
+  hostap/wpa_supplicant/wpa_passphrase_s1g \
+  hostap/hostapd/hostapd_s1g \
+  hostap/hostapd/hostapd_cli_s1g \
+  morse_cli/morse_cli
+
+log "Refreshing module dependencies"
+as_root depmod -a
+
+cat <<EOF
+
+Done.
+
+  Driver:    dkms status -m $PACKAGE_NAME
+  Load it:   sudo modprobe morse
+  Firmware:  /lib/firmware/morse
+  Tools:     $BINDIR (hostapd_s1g, wpa_supplicant_s1g, morse_cli, ...)
+
+Regdomain is pinned to $COUNTRY via /etc/modprobe.d/morse.conf; re-run with
+COUNTRY=<cc> to change it.
+EOF

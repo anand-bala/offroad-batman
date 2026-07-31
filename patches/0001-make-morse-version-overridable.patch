@@ -1,0 +1,39 @@
+Make MORSE_VERSION settable from the command line.
+
+Both Makefiles pin MORSE_VERSION with `override`, which by definition
+discards any value passed on the make command line or in the environment.
+That means the release string is baked in and there is no way to stamp a
+local build (e.g. with the checked-out driver SHA) the way the vendor
+build scripts try to. Switch to `?=` so the default is unchanged when
+nothing is passed, but a caller -- dkms.conf here -- can override it.
+
+dot11ah/Makefile needs the same treatment: kbuild descends into it as a
+subdirectory makefile, so its own `override` would otherwise win for the
+dot11ah module even when the top-level value is set.
+
+diff --git a/morse_driver/Makefile b/morse_driver/Makefile
+index fba3564..f5748e6 100644
+--- a/morse_driver/Makefile
++++ b/morse_driver/Makefile
+@@ -8,7 +8,7 @@ else
+ endif
+ 
+ # Set 0 to a version number. This is done to match the Linux expectations
+-override MORSE_VERSION = "0-rel_mm8108_2_0_0_2026_Apr_21"
++MORSE_VERSION ?= "0-rel_mm8108_2_0_0_2026_Apr_21"
+ 
+ USING_CLANG := $(shell $(CC) -v 2>&1 | grep -c "clang version")
+ 
+diff --git a/morse_driver/dot11ah/Makefile b/morse_driver/dot11ah/Makefile
+index a713c4e..4f558d7 100644
+--- a/morse_driver/dot11ah/Makefile
++++ b/morse_driver/dot11ah/Makefile
+@@ -8,7 +8,7 @@ DEBFLAGS = -O2
+ endif
+ 
+ # Set 0 to a version number. This is done to match the Linux expectations
+-override MORSE_VERSION = "0-rel_mm8108_2_0_0_2026_Apr_21"
++MORSE_VERSION ?= "0-rel_mm8108_2_0_0_2026_Apr_21"
+ 
+ #ccflags-y += $(DEBFLAGS) -Werror
+ ccflags-y += "-DMORSE_VERSION=$(MORSE_VERSION)"
