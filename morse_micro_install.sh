@@ -129,8 +129,34 @@ echo "options morse country=$COUNTRY" | as_root tee /etc/modprobe.d/morse.conf >
 # hostapd_s1g / wpa_supplicant_s1g
 # ---------------------------------------------------------------------------
 
-HOSTAP_CFLAGS="-D_GNU_SOURCE -I$ROOT/morse_cli -Wno-deprecated-declarations -Wno-error=implicit-function-declaration"
+# CFLAGS and LIBS must reach hostap through the ENVIRONMENT, never as make
+# command-line assignments. hostap accumulates both with `+=` -- the include
+# paths at wpa_supplicant/Makefile:68-69 and src/lib.rules:13, and 30-odd
+# `LIBS +=` lines driven by .config -- and a command-line assignment overrides
+# every one of them. Doing that strips the -I paths (fatal: utils/includes.h:
+# No such file) and, once that is past, every feature library at link time.
+#
+# Because we define CFLAGS at all, src/build.rules:33 `ifndef CFLAGS` no longer
+# fires, so its defaults have to be reproduced here: -MMD generates the .d
+# files that make incremental rebuilds correct, and without -O2 the build is
+# unoptimised.
+HOSTAP_CFLAGS="-MMD -O2 -Wall -g"
+HOSTAP_CFLAGS+=" -D_GNU_SOURCE -I$ROOT/morse_cli"
+HOSTAP_CFLAGS+=" -Wno-deprecated-declarations"
+# gcc 14+ (Ubuntu 24.04 / JetPack 7) makes implicit-function-declaration an
+# error by default. hostap appends its own -Werror after our flags
+# (Makefile:60,67), but -Wno-error= for a specific warning still wins over a
+# later blanket -Werror, so this survives that ordering.
+HOSTAP_CFLAGS+=" -Wno-error=implicit-function-declaration"
 HOSTAP_LIBS="-lnl-3 -lnl-genl-3 -lm -lpthread -lcrypto -lssl"
+
+# hostap stamps the binary with `git describe --dirty=+`
+# (wpa_supplicant/Makefile:71-78). The MorseMicro fork carries only unannotated
+# tags, so that prints "fatal: no annotated tags can describe ..." on stderr.
+# It is noise rather than a failure -- $(shell) yields empty, the `ifneq` guard
+# then skips the define -- but the version string it would have produced is
+# redundant next to MORSE_VERSION at Makefile:82, so turn the block off.
+export CONFIG_NO_GITVER=y
 
 # Options to flip relative to each component's shipped defconfig. The vendor
 # script collapses these into single backslash-continued strings and then loops
@@ -215,16 +241,14 @@ write_hostap_config() {
 log "Building wpa_supplicant_s1g..."
 write_hostap_config hostap/wpa_supplicant "${WPA_S_ENABLE[*]}" "${WPA_S_DISABLE[*]}"
 make -C hostap/wpa_supplicant clean
-make -j"$(nproc)" -C hostap/wpa_supplicant \
-  CFLAGS="$HOSTAP_CFLAGS" \
-  LIBS="$HOSTAP_LIBS"
+CFLAGS="$HOSTAP_CFLAGS" LIBS="$HOSTAP_LIBS" \
+  make -j"$(nproc)" -C hostap/wpa_supplicant
 
 log "Building hostapd_s1g..."
 write_hostap_config hostap/hostapd "${HOSTAPD_ENABLE[*]}" "${HOSTAPD_DISABLE[*]-}"
 make -C hostap/hostapd clean
-make -j"$(nproc)" -C hostap/hostapd \
-  CFLAGS="$HOSTAP_CFLAGS" \
-  LIBS="$HOSTAP_LIBS"
+CFLAGS="$HOSTAP_CFLAGS" LIBS="$HOSTAP_LIBS" \
+  make -j"$(nproc)" -C hostap/hostapd
 
 # ---------------------------------------------------------------------------
 # morse_cli
