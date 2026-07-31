@@ -140,7 +140,15 @@ echo "options morse country=$COUNTRY" | as_root tee /etc/modprobe.d/morse.conf >
 # fires, so its defaults have to be reproduced here: -MMD generates the .d
 # files that make incremental rebuilds correct, and without -O2 the build is
 # unoptimised.
-HOSTAP_CFLAGS="-MMD -O2 -Wall -g"
+#
+# Note the missing -Wall, which build.rules:34 does include. hostap compiles
+# with its own -Wextra -Werror (Makefile:60,67), so adding -Wall does not just
+# surface more warnings -- it promotes them to hard errors across a vendor tree
+# we do not control. It fails on, for example, the unused `i` at
+# src/ap/ap_config.c:849, which is declared for CONFIG_WPS || CONFIG_HS20 but
+# only used under CONFIG_WPS. -Wunused-variable comes from -Wall, not -Wextra,
+# so hostap's intended warning level stays intact without it.
+HOSTAP_CFLAGS="-MMD -O2 -g"
 HOSTAP_CFLAGS+=" -D_GNU_SOURCE -I$ROOT/morse_cli"
 HOSTAP_CFLAGS+=" -Wno-deprecated-declarations"
 # gcc 14+ (Ubuntu 24.04 / JetPack 7) makes implicit-function-declaration an
@@ -148,6 +156,25 @@ HOSTAP_CFLAGS+=" -Wno-deprecated-declarations"
 # (Makefile:60,67), but -Wno-error= for a specific warning still wins over a
 # later blanket -Werror, so this survives that ordering.
 HOSTAP_CFLAGS+=" -Wno-error=implicit-function-declaration"
+
+# Warnings that newer compilers added and that hostap's -Werror turns fatal on
+# vendor code we do not control. These cannot be added unconditionally: gcc
+# rejects -Wno-error= for a warning it does not know ("no option -W...") as a
+# hard error, so listing one here would break every older gcc. Probe first.
+#
+#   -Wunterminated-string-initialization: added to -Wextra in gcc 14, fires 45
+#   times on the vendor's own src/utils/morse.c (the cc_list country-code
+#   tables, which intentionally store 2 chars in char[2] with no NUL).
+cflag_supported() {
+  echo 'int main(void){return 0;}' |
+    "${CC:-gcc}" -x c "$1" -c - -o /dev/null 2>/dev/null
+}
+for _flag in -Wno-error=unterminated-string-initialization; do
+  if cflag_supported "$_flag"; then
+    HOSTAP_CFLAGS+=" $_flag"
+  fi
+done
+unset _flag
 HOSTAP_LIBS="-lnl-3 -lnl-genl-3 -lm -lpthread -lcrypto -lssl"
 
 # hostap stamps the binary with `git describe --dirty=+`
