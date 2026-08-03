@@ -1,16 +1,19 @@
 [submodule "morse-firmware"]
-	path = morse-firmware
+	path = morse/morse-firmware
 	url = https://github.com/MorseMicro/morse-firmware.git
 	branch = mm8108-2.0.0
 [submodule "morse_driver"]
-	path = morse_driver
+	path = morse/morse_driver
 	url = https://github.com/MorseMicro/morse_driver.git
 	branch = mm8108-2.0.0
 [submodule "morse_cli"]
-	path = morse_cli
+	path = morse/morse_cli
 	url = https://github.com/MorseMicro/morse_cli.git
 	branch = mm8108-2.0.0
 [submodule "hostap"]
-	path = hostap
+	path = morse/hostap
 	url = https://github.com/MorseMicro/hostap.git
 	branch = mm8108-2.0.0
+[submodule "batman/batman-adv"]
+	path = batman/batman-adv
+	url = https://github.com/open-mesh-mirror/batman-adv.git
