@@ -19,10 +19,11 @@ cd morse-micro
 ./morse/morse_micro_install.sh
 ```
 
-The repo holds two independently installable packages -- `morse/` for the
-driver stack and `batman/` for the mesh routing module -- each with its own
-`dkms.conf`, plus the bring-up scripts at the root. Neither install depends on
-the other; a node that only needs the radio never has to build `batman-adv`.
+The repo holds two independently installable packages -- `morse/` for the driver stack
+and `batman/` for the mesh routing module -- each with its own `dkms.conf`,
+plus the bring-up scripts at the root.
+Neither install depends on the other;
+a node that only needs the radio never has to build `batman-adv`.
 
 Installs:
 
@@ -116,9 +117,9 @@ and look healthy with no peer.
 
 ### `halow-batman.sh`
 
-Layers `batman-adv` over an IBSS interface. Run `halow-ibss.sh up` first; this
-assumes `wlan0` is already in IBSS mode with a peer. Same shape -- a bring-up
-harness, nothing persists across a reboot.
+Layers `batman-adv` over an IBSS interface.
+Run `halow-ibss.sh up` first; this assumes `wlan0` is already in IBSS mode with a peer.
+Same shape -- a bring-up harness, nothing persists across a reboot.
 
 ```sh
 sudo BAT_IP=192.168.60.1/24 ./halow-batman.sh up
@@ -134,30 +135,34 @@ sudo ./halow-batman.sh down
 | `ROUTING_ALGO` | `BATMAN_IV` | Must be set before the mesh interface exists |
 | `HARD_MTU` | unset | e.g. `1532`, to keep `bat0` at a full 1500 |
 
-**The script flushes the IP off `wlan0`.** This is the behaviour most likely to
-surprise: `halow-ibss.sh` puts `NODE_IP` there, but once `batman-adv` owns the
-interface it must carry no address of its own or traffic takes the direct path
-and silently bypasses mesh routing. Addressing moves to `bat0`, on a separate
-subnet so it is obvious which layer is under test. `down` tears down only the
-routing layer and leaves the IBSS up, so the transport can be retested alone.
+**The script flushes the IP off `wlan0`.**
+This is the behaviour most likely to surprise: `halow-ibss.sh` puts `NODE_IP` there,
+but once `batman-adv` owns the interface it must carry no address of its own
+or traffic takes the direct path and silently bypasses mesh routing.
+Addressing moves to `bat0`,
+on a separate subnet so it is obvious which layer is under test.
+`down` tears down only the routing layer and leaves the IBSS up,
+so the transport can be retested alone.
 
-`BATMAN_IV` is the default deliberately. `BATMAN_V` selects routes by estimated
-throughput, which depends on the driver reporting sane rate information --
-not an assumption worth making on an S1G driver this new.
+`BATMAN_IV` is the default deliberately.
+`BATMAN_V` selects routes by estimated throughput,
+which depends on the driver reporting sane rate information -- not an assumption worth
+making on an S1G driver this new.
 
-`batman-adv` adds ~28 bytes of header, so `bat0` comes up around 1472 unless
-the hard interface goes to 1532. Whether the Morse driver accepts an oversized
-MTU is untested, hence opt-in via `HARD_MTU`.
+`batman-adv` adds ~28 bytes of header,
+so `bat0` comes up around 1472 unless the hard interface goes to 1532.
+Whether the Morse driver accepts an oversized MTU is untested,
+hence opt-in via `HARD_MTU`.
 
 Note `batman-adv` will happily form a mesh of one that looks entirely healthy
-and forwards nothing, so the script warns when the IBSS has no peers. The real
-check is `batctl meshif bat0 originators` listing the other nodes.
+and forwards nothing, so the script warns when the IBSS has no peers.
+The real check is `batctl meshif bat0 originators` listing the other nodes.
 
 ### Installing `batman-adv`
 
-Not packaged for noble -- `batman-adv-dkms` has no candidate, and upstream
-ships a `Makefile` but no `dkms.conf` (Debian's packaging adds that). `batctl`
-is in universe and pairs with any nearby module version:
+Not packaged for noble -- `batman-adv-dkms` has no candidate,
+and upstream ships a `Makefile` but no `dkms.conf` (Debian's packaging adds that).
+`batctl` is in universe and pairs with any nearby module version:
 
 ```sh
 sudo apt install batctl
@@ -173,15 +178,18 @@ git submodule update --init batman/batman-adv
 Uninstall with `./batman/install.sh --uninstall`.
 
 Upstream states it "compiles against and should work with Linux 5.10 - 7.2",
-so 6.8-tegra is in range. The out-of-tree build is driven entirely by
-`KERNELPATH` (`README.external.rst`); there is no configure step.
+so 6.8-tegra is in range.
+The out-of-tree build is driven entirely by `KERNELPATH` (`README.external.rst`);
+there is no configure step.
 
-Upstream ships a `Makefile` but **no** `dkms.conf` -- Debian's packaging
-supplies one, which is why there is no `batman-adv-dkms` in noble to install
-instead. `batman/dkms.conf` is that missing file. Like the driver installer,
-`install.sh` stages a copy into `/usr/src` rather than pointing DKMS at the
-checkout, because kernel-upgrade rebuilds run long afterwards and must not
-depend on the working tree still existing or still being on the same commit.
+Upstream ships a `Makefile` but **no** `dkms.conf` -- Debian's packaging supplies one,
+which is why there is no `batman-adv-dkms` in noble to install instead.
+`batman/dkms.conf` is that missing file.
+Like the driver installer,
+`install.sh` stages a copy into `/usr/src` rather than pointing DKMS at the checkout,
+because kernel-upgrade rebuilds run long afterwards
+and must not depend on the working tree still existing
+or still being on the same commit.
 
 `PACKAGE_VERSION` in `batman/dkms.conf` tracks the submodule's pinned tag.
 Bump both together -- DKMS keys its `/usr/src` tree on the name/version pair,
@@ -206,8 +214,8 @@ Sources come from [open-mesh][om]; the submodule points at the
 6. WireGuard over `bat0`.
 
 On the Jetsons the `batman-adv` module has to be built -- see
-[Installing batman-adv](#installing-batman-adv). OpenWrt has both the module
-and `batctl` as packages, so the router needs none of that.
+[Installing batman-adv](#installing-batman-adv).
+OpenWrt has both the module and `batctl` as packages, so the router needs none of that.
 
 ### Range and Bandwidth
 
@@ -240,15 +248,18 @@ Three consequences:
   not at 8 MHz. batman-adv handles the partition and rejoin cleanly,
   but cannot invent a relay that is not there.
 
-**Do not bench-test these radios on the same desk.** At 1 m the received level
-is about -8 dBm by the same arithmetic, and a measured -12 dBm matches that
-closely. Most 802.11 receivers start compressing around -20 dBm, so at that
-range the front end is saturated: peering succeeds (management frames use the
-most robust rate) while every data frame fails, which reads as a broken driver
-rather than as too much signal. Reaching a healthy -50 dBm needs roughly 38 dB
-more loss -- about 80 m in free space. Use 30 dB inline attenuators, or put the
-nodes in different rooms. Target -40 to -60 dBm for functional testing, and
-treat any RSSI taken at short range as meaningless for range planning.
+**Do not bench-test these radios on the same desk.**
+At 1 m the received level is about -8 dBm by the same arithmetic,
+and a measured -12 dBm matches that closely.
+Most 802.11 receivers start compressing around -20 dBm,
+so at that range the front end is saturated: peering succeeds
+(management frames use the most robust rate)
+while every data frame fails,
+which reads as a broken driver rather than as too much signal.
+Reaching a healthy -50 dBm needs roughly 38 dB more loss -- about 80 m in free space.
+Use 30 dB inline attenuators, or put the nodes in different rooms.
+Target -40 to -60 dBm for functional testing,
+and treat any RSSI taken at short range as meaningless for range planning.
 
 Measure rather than trust the arithmetic.
 Walk two nodes to 750 m and to 1.5 km at each bandwidth and record:
@@ -266,41 +277,48 @@ so measure at the deployment site.
 Budget 15-20 dB of fade margin for a link you intend to rely on.
 Links that measure as barely working on a calm day fail on a wet one.
 
-### The 802.11s Fallback
+### The 802.11S Fallback
 
-Only relevant if the IBSS gate fails. Researched 2026-08-03; no code here
-depends on it.
+Only relevant if the IBSS gate fails.
+Researched 2026-08-03; no code here depends on it.
 
-**There is no prebuilt Tegra kernel with mesh support.** An
-[NVIDIA forum thread][nv-mesh] reports exactly this problem on
-6.8.12-1021-tegra -- our kernel -- with no `mesh point` iftype despite
-compatible hardware. NVIDIA staff engaged but never said whether it is
-deliberate, whether it will change, or how to work around it. No resolution.
+**There is no prebuilt Tegra kernel with mesh support.**
+An [NVIDIA forum thread][nv-mesh] reports exactly this problem on 6.8.12-1021-tegra --
+our kernel -- with no `mesh point` iftype despite compatible hardware.
+NVIDIA staff engaged but never said whether it is deliberate, whether it will change,
+or how to work around it.
+No resolution.
 [OE4T/meta-tegra][oe4t] can flip the option via `scripts/patch_defconfig.sh`,
 but that is still a kernel you build yourself.
 
-That thread's author independently landed on "IBSS plus batman-adv and adding
-WireGuard for security" -- the same stack as this repo. Encouraging, but it is
-a stated plan in a forum post, not a report of success, so it is not evidence
-that S1G IBSS works. Only our own gate test settles that.
+That thread's author independently landed on "IBSS plus batman-adv and adding WireGuard
+for security" -- the same stack as this repo.
+Encouraging, but it is a stated plan in a forum post, not a report of success,
+so it is not evidence that S1G IBSS works.
+Only our own gate test settles that.
 
-**Rebuild only the module, not the kernel.** A [second thread][nv-boot]
-records boot loops and NVMe rootfs mount failure needing a full reflash after
-enabling mesh. The root cause is instructive: that user set
-`CONFIG_MAC80211=y`, moving mac80211 from module to built-in, which changes the
-kernel ABI and requires rebuilding every module and updating the initrd with
-the out-of-tree modules. Skipping that is what broke the boot, because the PCIe
-wireless driver is read from initrd.
+**Rebuild only the module, not the kernel.**
+A [second thread][nv-boot] records boot loops
+and NVMe rootfs mount failure needing a full reflash after enabling mesh.
+The root cause is instructive: that user set `CONFIG_MAC80211=y`,
+moving mac80211 from module to built-in,
+which changes the kernel ABI and requires rebuilding every module
+and updating the initrd with the out-of-tree modules.
+Skipping that is what broke the boot,
+because the PCIe wireless driver is read from initrd.
 
-Our kernel already has `CONFIG_MAC80211=m`, and `CONFIG_MAC80211_MESH` is a
-bool *inside* that module. So the safe route is to leave `CONFIG_MAC80211=m`
-alone, flip only the mesh bool, and rebuild `mac80211.ko` by itself -- no ABI
-change, no initrd surgery, no reflash risk. Drop the one `.ko` into
-`/lib/modules/$(uname -r)/updates/` and rebuild `morse.ko` against it. Set
-`CONFIG_LOCALVERSION` to keep the variant distinguishable.
+Our kernel already has `CONFIG_MAC80211=m`,
+and `CONFIG_MAC80211_MESH` is a bool *inside* that module.
+So the safe route is to leave `CONFIG_MAC80211=m` alone, flip only the mesh bool,
+and rebuild `mac80211.ko` by itself -- no ABI change, no initrd surgery,
+no reflash risk.
+Drop the one `.ko` into `/lib/modules/$(uname -r)/updates/`
+and rebuild `morse.ko` against it.
+Set `CONFIG_LOCALVERSION` to keep the variant distinguishable.
 
-This needs full L4T kernel source matching the running kernel; the headers
-package does not carry `net/mac80211/*.c`. It would then want wrapping in DKMS,
+This needs full L4T kernel source matching the running kernel;
+the headers package does not carry `net/mac80211/*.c`.
+It would then want wrapping in DKMS,
 since it has to be applied to four Jetsons and survive kernel upgrades.
 
 [nv-mesh]: https://forums.developer.nvidia.com/t/jetpack-7-2-kernel-6-8-no-802-11s-support-mesh-point-missing-despite-compatible-wifi-hardware/372457
