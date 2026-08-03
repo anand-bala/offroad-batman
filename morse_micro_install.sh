@@ -254,14 +254,41 @@ HOSTAPD_ENABLE=(
 )
 
 # $2 and $3 are space-separated option lists (pass arrays as "${arr[*]}").
+#
+# They have to be re-split into arrays here: bash cannot pass an array by value,
+# so `local enabled=$2` yields a scalar, and "${enabled[@]}" over a scalar
+# expands to a single element holding the whole joined string. Every sed then
+# looks for an option literally named "CONFIG_A CONFIG_B ..." and silently
+# matches nothing -- which is how both daemons ended up built straight from
+# defconfig. `read -ra` splits without exposing the values to globbing.
 write_hostap_config() {
-  local dir=$1 enabled=$2 disabled=$3 opt
+  local dir=$1 opt
+  local -a enabled disabled
+  read -ra enabled <<<"$2"
+  read -ra disabled <<<"$3"
+
   cp "$dir/defconfig" "$dir/.config"
   for opt in "${enabled[@]}"; do
     sed -i -e "s/^#$opt=y/$opt=y/" "$dir/.config"
   done
   for opt in "${disabled[@]}"; do
     sed -i -e "s/^$opt=y/#$opt=y/" "$dir/.config"
+  done
+
+  # A sed that matches nothing is not an error, so an option that is absent
+  # from defconfig or spelled differently would fail exactly as silently as the
+  # bug above. Check the end state instead of trusting the substitutions.
+  for opt in "${enabled[@]}"; do
+    if ! grep -qE "^$opt=y" "$dir/.config"; then
+      >&2 echo "$dir/.config: failed to enable $opt (absent from defconfig?)"
+      exit 1
+    fi
+  done
+  for opt in "${disabled[@]}"; do
+    if ! grep -qE "^#$opt=y" "$dir/.config"; then
+      >&2 echo "$dir/.config: failed to disable $opt (absent from defconfig?)"
+      exit 1
+    fi
   done
 }
 
