@@ -15,17 +15,38 @@
 
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=node-id.sh
+source "$ROOT/node-id.sh"
+
 # --------------------------------------------------------------------------
 # Configuration -- edit per node
 # --------------------------------------------------------------------------
 
+# Auto-detected by driver, so it works before and after the 10-halow.link
+# rename. Set IFACE explicitly to override.
+IFACE=${IFACE:-$(morse_iface)}
 IFACE=${IFACE:-wlan0}
 BATIF=${BATIF:-bat0}
 
-# Unique per node. Note this replaces the address halow-ibss.sh put on wlan0:
-# once batman-adv owns the interface, wlan0 must carry no IP of its own, or
-# traffic bypasses the mesh routing entirely.
-BAT_IP=${BAT_IP:-192.168.60.1/24}
+# MAC -> name table, installed to /etc/bat-hosts so batctl prints names instead
+# of hex. Same file on every node; set empty to skip installing it.
+BAT_HOSTS=${BAT_HOSTS:-$ROOT/bat-hosts}
+
+# Name -> bat0 address, merged into /etc/hosts. Set empty to skip.
+HOSTS=${HOSTS:-$ROOT/hosts}
+HOSTS_BEGIN="# BEGIN halow-batman"
+HOSTS_END="# END halow-batman"
+
+# Derived from the hosts file via this node's identity. Replaces the address
+# halow-ibss.sh put on wlan0: once batman-adv owns the interface, wlan0 must
+# carry no IP of its own, or traffic bypasses the mesh routing entirely.
+NODE_NAME=${NODE_NAME:-$(node_name "$IFACE" "$ROOT/bat-hosts")}
+
+if [[ -z ${BAT_IP:-} ]]; then
+  _ip=$(node_ip "$NODE_NAME" "$ROOT/hosts")
+  BAT_IP="${_ip:-192.168.60.1}/24"
+fi
 
 # server on the node with the uplink (the travel router), client on the rest,
 # off to disable gateway handling. With client/server set, batman-adv elects a
@@ -96,6 +117,27 @@ bring_up() {
 
   ip addr flush dev "$BATIF" 2>/dev/null || true
   ip addr add "$BAT_IP" dev "$BATIF"
+
+  if [[ -n $BAT_HOSTS && -f $BAT_HOSTS ]]; then
+    install -m 0644 "$BAT_HOSTS" /etc/bat-hosts
+    log "installed $(grep -cvE '^\s*(#|$)' "$BAT_HOSTS") names to /etc/bat-hosts"
+  fi
+
+  # /etc/hosts is never overwritten -- only the marked block is replaced, so
+  # localhost and anything else the distro put there survives.
+  if [[ -n $HOSTS && -f $HOSTS ]]; then
+    local tmp
+    tmp=$(mktemp)
+    sed "\|^${HOSTS_BEGIN}\$|,\|^${HOSTS_END}\$|d" /etc/hosts > "$tmp"
+    {
+      echo "$HOSTS_BEGIN"
+      grep -vE '^\s*(#|$)' "$HOSTS"
+      echo "$HOSTS_END"
+    } >> "$tmp"
+    install -m 0644 "$tmp" /etc/hosts
+    rm -f "$tmp"
+    log "merged $(grep -cvE '^\s*(#|$)' "$HOSTS") names into /etc/hosts"
+  fi
 
   if [[ $GW_MODE != off ]]; then
     bat gw_mode "$GW_MODE"

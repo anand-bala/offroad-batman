@@ -17,10 +17,17 @@
 
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=node-id.sh
+source "$ROOT/node-id.sh"
+
 # --------------------------------------------------------------------------
-# Configuration -- edit per node
+# Configuration
 # --------------------------------------------------------------------------
 
+# Auto-detected by driver, so it works before and after the 10-halow.link
+# rename. Set IFACE explicitly to override.
+IFACE=${IFACE:-$(morse_iface)}
 IFACE=${IFACE:-wlan0}
 PHY=${PHY:-phy0}
 SSID=${SSID:-HaLow-IBSS}
@@ -38,8 +45,20 @@ COUNTRY=${COUNTRY:-US}
 CHANNEL=${CHANNEL:-33}
 OP_CLASS=${OP_CLASS:-68}
 
-# Unique per node. /24 so all four sit in one subnet.
-NODE_IP=${NODE_IP:-192.168.50.1/24}
+# Derived: identity from the wlan0 MAC via bat-hosts, last octet from the hosts
+# file, against the IBSS subnet. Set NODE_IP explicitly to override, or when the
+# node is not listed in those files.
+IBSS_SUBNET=${IBSS_SUBNET:-192.168.50}
+NODE_NAME=${NODE_NAME:-$(node_name "$IFACE" "$ROOT/bat-hosts")}
+
+if [[ -z ${NODE_IP:-} ]]; then
+  _bat_ip=$(node_ip "$NODE_NAME" "$ROOT/hosts")
+  if [[ -n $_bat_ip ]]; then
+    NODE_IP="$IBSS_SUBNET.${_bat_ip##*.}/24"
+  else
+    NODE_IP=192.168.50.1/24
+  fi
+fi
 
 # Only used by up-rsn. Generate with: openssl rand -base64 24
 # Long and random matters here -- see the offline-dictionary caveat for

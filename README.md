@@ -70,27 +70,106 @@ Fixed now, but binaries predating the fix are missing all the `WPA_S_ENABLE` /
 `CONFIG_SAE` and `CONFIG_IBSS_RSN` are on in `defconfig` already,
 so the IBSS path works on either build.
 
+### Interface Naming
+
+The card is USB, so predictable naming hands it a MAC-derived name like
+`wlx0cbf74005bc8` -- different on every node, which makes shared scripts and
+config impossible. `10-halow.link` renames it:
+
+```sh
+sudo install -m 0644 10-halow.link /etc/systemd/network/10-halow.link
+sudo udevadm control --reload
+# reboot, or unplug/replug the card
+```
+
+Verify without rebooting:
+
+```sh
+udevadm test-builtin net_setup_link /sys/class/net/<iface>
+```
+
+**The name is `halow0`, not `wlan0`.** systemd warns against renaming into the
+kernel's own namespace (`eth*`, `wlan*`): the kernel may hand that name to
+another device before the rename lands, and the rename then fails
+*intermittently* -- a poor failure mode on a node you cannot reach. `halow0` is
+outside that namespace and cannot collide.
+
+The cost is that `morse_cli` defaults to `wlan0`, so by-hand invocations need
+`-i halow0`. Every script here already passes `-i "$IFACE"`, so they are
+unaffected.
+
+The file matches on `Driver=` rather than MAC, which is what lets one identical
+file go on all four Jetsons. Confirm the driver name reported for the netdev
+first -- it is usually the module name (`morse`), while the USB driver registers
+separately as `morse_usb` (`morse/morse_driver/usb.c:1212`):
+
+```sh
+ethtool -i <iface> | head -2
+udevadm info /sys/class/net/<iface> | grep -E 'ID_NET_DRIVER|DRIVERS='
+```
+
+Scripts do not depend on any of this: `IFACE` defaults to whichever netdev is
+bound to a `morse*` driver (`morse_iface` in `node-id.sh`), so they work before
+and after the rename, and on a node where it was never installed.
+
+### Identity and Addressing
+
+Two tables drive everything, identical on every node:
+
+- `bat-hosts` -- MAC to name, installed to `/etc/bat-hosts`
+- `hosts` -- name to `bat0` address, merged into `/etc/hosts`
+
+A node works out which one it is from its own radio MAC, and both addresses
+follow:
+
+```
+radio MAC -> bat-hosts -> name -> hosts -> bat0 IP -> last octet -> IBSS IP
+```
+
+So `0c:bf:74:00:5b:c8` becomes `olo.lan`, with `192.168.60.1/24` on `bat0` and
+`192.168.50.1/24` on the radio. Adding a node is one line in each file and
+nothing else; no per-node edits, no per-node invocation.
+
+Fallbacks run in order -- `NODE_NAME` env, then MAC lookup, then the system
+hostname -- and explicit `NODE_IP` / `BAT_IP` always win. Shared resolution
+lives in `node-id.sh`, sourced by all four scripts, so they cannot disagree
+about who this node is.
+
+`/etc/hosts` is never overwritten. Only a marked block is replaced, so
+`localhost` and anything the distro put there survive, and repeated runs are
+idempotent.
+
+Naming pays off twice. `batctl meshif bat0 originators` prints names instead of
+hex, and `batctl meshif bat0 ping olo.lan` is an L2 ping that bypasses IP
+entirely -- which separates "the mesh is broken" from "the addressing is
+broken". Note the distro likely already has `127.0.1.1 olo` in `/etc/hosts`, so
+prefer the unambiguous `.lan` names when you mean the mesh address.
+
 ### `halow-ibss.sh`
 
 Brings an interface up in IBSS mode for bring-up and testing.
 Not a production service -- nothing persists across a reboot, by design.
 
 ```sh
-sudo NODE_IP=192.168.50.1/24 DEBUG=1 ./halow-ibss.sh up # open IBSS
-sudo NODE_IP=192.168.50.2/24 ./halow-ibss.sh up-rsn     # RSN-IBSS, needs PSK
+sudo DEBUG=1 ./halow-ibss.sh up   # open IBSS
+sudo ./halow-ibss.sh up-rsn       # RSN-IBSS, needs PSK
 sudo ./halow-ibss.sh status
 sudo ./halow-ibss.sh down
 ```
 
-Run identical parameters on every node; only `NODE_IP` differs.
+Run identical parameters on every node. Nothing needs editing per node --
+identity and addressing derive from the MAC; see
+[Identity and addressing](#identity-and-addressing).
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `IFACE` / `PHY` | `wlan0` / `phy0` | |
+| `IFACE` / `PHY` | auto-detected / `phy0` | Found by driver; see [Interface naming](#interface-naming) |
 | `SSID` | `HaLow-IBSS` | Must match fleet-wide |
 | `CHANNEL` / `OP_CLASS` | `33` / `68` (1 MHz @ 918.5 MHz) | Must match fleet-wide |
 | `FREQ` | unset | Fallback: emits `frequency=` instead of `channel`/`op_class` |
-| `NODE_IP` | `192.168.50.1/24` | Unique per node |
+| `NODE_IP` | derived | From `hosts` via the node's MAC; override to force |
+| `IBSS_SUBNET` | `192.168.50` | Subnet the derived IBSS address is built in |
+| `NODE_NAME` | derived | Overrides MAC-based identity lookup |
 | `PSK` | unset | `up-rsn` only; use `openssl rand -base64 24` |
 | `DEBUG` | `0` | `1` runs the supplicant foreground with `-d`, and skips IP assignment |
 
@@ -122,15 +201,17 @@ Run `halow-ibss.sh up` first; this assumes `wlan0` is already in IBSS mode with 
 Same shape -- a bring-up harness, nothing persists across a reboot.
 
 ```sh
-sudo BAT_IP=192.168.60.1/24 ./halow-batman.sh up
+sudo ./halow-batman.sh up
 sudo ./halow-batman.sh status
 sudo ./halow-batman.sh down
 ```
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `IFACE` / `BATIF` | `wlan0` / `bat0` | |
-| `BAT_IP` | `192.168.60.1/24` | Unique per node; replaces the address on `wlan0` |
+| `IFACE` / `BATIF` | auto-detected / `bat0` | |
+| `BAT_IP` | derived | From `hosts`; replaces the address on the radio |
+| `BAT_HOSTS` | `./bat-hosts` | Installed to `/etc/bat-hosts`; empty to skip |
+| `HOSTS` | `./hosts` | Merged into `/etc/hosts`; empty to skip |
 | `GW_MODE` | `off` | `server` on the uplink node, `client` elsewhere |
 | `ROUTING_ALGO` | `BATMAN_IV` | Must be set before the mesh interface exists |
 | `HARD_MTU` | unset | e.g. `1532`, to keep `bat0` at a full 1500 |
@@ -157,6 +238,83 @@ hence opt-in via `HARD_MTU`.
 Note `batman-adv` will happily form a mesh of one that looks entirely healthy
 and forwards nothing, so the script warns when the IBSS has no peers.
 The real check is `batctl meshif bat0 originators` listing the other nodes.
+
+### `halow-rangetest.sh`
+
+One measurement per position, appended to `rangetest.csv`. Intended for
+outdoor field testing with the link already up.
+
+```sh
+sudo PEER=node2 BW_MHZ=1 HEIGHT_M=4 ./halow-rangetest.sh 750 "clear LOS, dry"
+```
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `PEER` | *required* | IP or hostname to ping |
+| `PEER_MAC` | unset | Restrict RSSI sampling; empty takes the first station |
+| `SAMPLES` / `SAMPLE_INTERVAL` | `30` / `1` | RSSI sampling window, in seconds |
+| `PING_COUNT` / `PING_INTERVAL` | `100` / `0.2` | |
+| `IPERF` / `IPERF_TIME` | `0` / `10` | Needs `iperf3 -s` on the peer |
+| `BW_MHZ`, `HEIGHT_M` | unset | Recorded verbatim, not measured |
+| `OUT` / `LOGDIR` | `rangetest.csv` / `rangetest-logs/` | |
+
+Distance is an argument and height/bandwidth are variables because the node
+cannot know any of them. Record height every time -- it dominates path loss, so
+a row without it cannot be compared against any other row.
+
+**RSSI is sampled, not read once.** Outdoors a single reading varies by several
+dB with multipath and motion, so the script takes 30 over 30 s and records
+mean, min and max. The spread is often the more useful figure: a wide min/max
+at distance means a marginal link even when the mean looks healthy.
+
+All raw output -- `iw info`, the RSSI series, ping, originators,
+`morse_cli stats`, iperf JSON -- is kept under `rangetest-logs/`, because
+nobody wants to repeat a 750 m walk for one number that missed the CSV.
+
+Two limitations. **Bandwidth changes need both ends reconfigured**, so do every
+bandwidth at one position before moving. And **the reported TQ is the best
+originator**, which is the peer only while exactly two nodes are up; with the
+full fleet running, read `rangetest-logs/*.originators` instead.
+
+### `halow-walktest.sh`
+
+The continuous counterpart to `halow-rangetest.sh`: one node walks away while
+this samples once a second and records where the link dies. Run it on the
+**stationary** node.
+
+```sh
+sudo PEER=node2 BW_MHZ=1 HEIGHT_M=4 OUT=walk-1mhz.csv ./halow-walktest.sh
+```
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `PEER` | *required* | IP or hostname |
+| `SAMPLE_INTERVAL` | `1` | Seconds between probes |
+| `LOSS_HOLD` | `5` | Consecutive failed probes before declaring the link down |
+| `EXIT_AFTER_LOSS` | `0` | Seconds of continuous loss before exiting; 0 runs until Ctrl-C |
+| `PING_TIMEOUT` | `1` | Per-probe, keep below `SAMPLE_INTERVAL` |
+| `BW_MHZ`, `HEIGHT_M` | unset | Recorded verbatim |
+| `OUT` / `LOGDIR` | `walktest.csv` / `rangetest-logs/` | |
+
+Use `halow-rangetest.sh` for a careful measurement at a surveyed distance, and
+this for finding the cliff edge. It trades precision for a continuous trace.
+
+**Ping decides whether the link is alive, not `iw`.** A station lingers in
+`station dump` for some time after it stops being reachable, so RSSI alone
+would report a healthy link well past the actual cutoff. `LOSS_HOLD` adds
+hysteresis: a single dropped ping at range is a fade, several in a row is a
+cutoff. The script keeps running after loss and logs a `REGAINED` event if the
+walker comes back, which is what you want when probing the boundary.
+
+Nothing on the node knows how far away the walker is. Type a note and press
+Enter at any point -- `200 m`, `past the treeline` -- and it lands on the next
+row; otherwise correlate `elapsed_s` against a GPS track afterwards.
+
+The number to take away is **weakest working RSSI**, reported in the summary.
+That is the practical sensitivity floor at that bandwidth, and the figure the
+whole range budget rests on. Budget 15-20 dB above it for a link you intend to
+rely on, then repeat per bandwidth -- which means walking back, since both ends
+must be reconfigured together.
 
 ### Installing `batman-adv`
 
@@ -261,14 +419,10 @@ Use 30 dB inline attenuators, or put the nodes in different rooms.
 Target -40 to -60 dBm for functional testing,
 and treat any RSSI taken at short range as meaningless for range planning.
 
-Measure rather than trust the arithmetic.
-Walk two nodes to 750 m and to 1.5 km at each bandwidth and record:
-
-```sh
-iw dev wlan0 station dump | grep -E 'signal|bitrate' # per-peer RSSI
-batctl meshif bat0 originators                       # TQ, 0-255
-morse_cli -i wlan0 stats
-```
+Measure rather than trust the arithmetic. `halow-rangetest.sh` does the
+collecting -- see [below](#halow-rangetestsh). Walk two nodes out, run it at
+each position and bandwidth, and push outward until the 1 MHz link fails: that
+distance is the real per-hop budget the 1.5 km topology rests on.
 
 That yields the real path-loss exponent for the terrain,
 which is the number that actually decides this --
@@ -348,7 +502,13 @@ which someone can capture handshakes unseen.
 | Path | What |
 | --- | --- |
 | `halow-ibss.sh` | IBSS bring-up/test harness for the multi-hop work |
+| `node-id.sh` | Shared interface detection and identity resolution; sourced, not run |
+| `bat-hosts` | MAC to name, installed to `/etc/bat-hosts` |
+| `hosts` | Name to `bat0` address, merged into `/etc/hosts` |
+| `10-halow.link` | Renames the radio to `halow0`; install to `/etc/systemd/network/` |
 | `halow-batman.sh` | `batman-adv` routing layer over the IBSS interface |
+| `halow-rangetest.sh` | Field link-quality measurement, appends to `rangetest.csv` |
+| `halow-walktest.sh` | Continuous trace while a node walks away; records the cutoff |
 | `openwrt_setup.md` | Travel router as batman-adv gateway |
 | `morse/morse_micro_install.sh` | Driver stack installer |
 | `morse/dkms.conf` | Driver build config; staged into `/usr/src/morse-2.0.0` |

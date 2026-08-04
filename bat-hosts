@@ -1,0 +1,12 @@
+# MAC -> name for batctl output. Installed to /etc/bat-hosts by
+# halow-batman.sh; keep it identical on every node.
+#
+# Lets `batctl meshif bat0 originators` print names instead of hex, and enables
+# `batctl meshif bat0 ping olo.lan` -- an L2 ping that bypasses IP entirely,
+# which separates "the mesh is broken" from "the addressing is broken".
+#
+# Lowercase deliberately: iw and batctl print MACs lowercase, and the lookup is
+# a literal match.
+
+0c:bf:74:00:5b:c8    olo.lan
+0c:bf:74:00:57:4a    wazza.lan
