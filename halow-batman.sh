@@ -2,11 +2,11 @@
 #
 # halow-batman.sh -- layer a batman-adv mesh over an IBSS interface.
 #
-# Run halow-ibss.sh first; this assumes wlan0 is already in IBSS mode with at
+# Run halow-ibss.sh first; this assumes the radio is already in IBSS mode with at
 # least one peer. Like that script, this is a bring-up harness rather than a
 # production service, and nothing survives a reboot.
 #
-#   sudo ./halow-batman.sh up          # bat0 over wlan0
+#   sudo ./halow-batman.sh up          # bat0 over the radio
 #   sudo ./halow-batman.sh status      # neighbours, originators, gateways
 #   sudo ./halow-batman.sh down        # tear down, leave IBSS alone
 #
@@ -16,8 +16,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=node-id.sh
-source "$ROOT/node-id.sh"
+# shellcheck source=halow-lib.sh
+source "$ROOT/halow-lib.sh"
+LOG_TAG=halow-batman
 
 # --------------------------------------------------------------------------
 # Configuration -- edit per node
@@ -25,8 +26,7 @@ source "$ROOT/node-id.sh"
 
 # Auto-detected by driver, so it works before and after the 10-halow.link
 # rename. Set IFACE explicitly to override.
-IFACE=${IFACE:-$(morse_iface)}
-IFACE=${IFACE:-wlan0}
+IFACE=${IFACE:-$(default_iface)}
 BATIF=${BATIF:-bat0}
 
 # MAC -> name table, installed to /etc/bat-hosts so batctl prints names instead
@@ -35,11 +35,13 @@ BAT_HOSTS=${BAT_HOSTS:-$ROOT/bat-hosts}
 
 # Name -> bat0 address, merged into /etc/hosts. Set empty to skip.
 HOSTS=${HOSTS:-$ROOT/hosts}
-HOSTS_BEGIN="# BEGIN halow-batman"
-HOSTS_END="# END halow-batman"
+
+# Only used to synthesize the .ibss names in /etc/hosts; must match the value
+# halow-ibss.sh used, or the names will point at addresses nothing holds.
+IBSS_SUBNET=${IBSS_SUBNET:-192.168.50}
 
 # Derived from the hosts file via this node's identity. Replaces the address
-# halow-ibss.sh put on wlan0: once batman-adv owns the interface, wlan0 must
+# halow-ibss.sh put on the radio: once batman-adv owns the interface, it must
 # carry no IP of its own, or traffic bypasses the mesh routing entirely.
 NODE_NAME=${NODE_NAME:-$(node_name "$IFACE" "$ROOT/bat-hosts")}
 
@@ -68,19 +70,16 @@ HARD_MTU=${HARD_MTU:-}
 
 # --------------------------------------------------------------------------
 
-log() { printf '[halow-batman] %s\n' "$*" >&2; }
-die() { printf '[halow-batman] ERROR: %s\n' "$*" >&2; exit 1; }
-
 # batctl dropped the old `-m` form; 2024.x wants the `meshif` prefix.
 bat() { batctl meshif "$BATIF" "$@"; }
 
 preflight() {
-  [[ $EUID -eq 0 ]] || die "must run as root"
-  command -v batctl >/dev/null || die "batctl not found (apt install batctl)"
+  require_root
+  require_cmd batctl "apt install batctl"
   modinfo batman-adv >/dev/null 2>&1 \
     || die "batman-adv module not available; see README.md"
 
-  ip link show "$IFACE" >/dev/null 2>&1 || die "$IFACE does not exist"
+  require_iface "$IFACE"
 
   # batman-adv will happily run over an interface with no peers and give you a
   # mesh of one, which looks healthy and forwards nothing. Warn rather than
@@ -107,7 +106,7 @@ bring_up() {
       || log "warning: $IFACE rejected MTU $HARD_MTU; bat0 will be undersized"
   fi
 
-  # wlan0 must not hold an IP once batman owns it -- halow-ibss.sh puts one
+  # The radio must not hold an IP once batman owns it -- halow-ibss.sh puts one
   # there, and leaving it would let traffic take the direct path and silently
   # skip the mesh.
   ip addr flush dev "$IFACE"
@@ -123,21 +122,9 @@ bring_up() {
     log "installed $(grep -cvE '^\s*(#|$)' "$BAT_HOSTS") names to /etc/bat-hosts"
   fi
 
-  # /etc/hosts is never overwritten -- only the marked block is replaced, so
-  # localhost and anything else the distro put there survives.
-  if [[ -n $HOSTS && -f $HOSTS ]]; then
-    local tmp
-    tmp=$(mktemp)
-    sed "\|^${HOSTS_BEGIN}\$|,\|^${HOSTS_END}\$|d" /etc/hosts > "$tmp"
-    {
-      echo "$HOSTS_BEGIN"
-      grep -vE '^\s*(#|$)' "$HOSTS"
-      echo "$HOSTS_END"
-    } >> "$tmp"
-    install -m 0644 "$tmp" /etc/hosts
-    rm -f "$tmp"
-    log "merged $(grep -cvE '^\s*(#|$)' "$HOSTS") names into /etc/hosts"
-  fi
+  local merged
+  merged=$(merge_hosts "$HOSTS" "$IBSS_SUBNET")
+  [[ -n $merged ]] && log "merged $merged names into /etc/hosts (.lan and .ibss)"
 
   if [[ $GW_MODE != off ]]; then
     bat gw_mode "$GW_MODE"
@@ -148,7 +135,7 @@ bring_up() {
 }
 
 status() {
-  [[ $EUID -eq 0 ]] || die "must run as root"
+  require_root
 
   echo "=== interfaces in the mesh ==="
   bat interface || true
@@ -171,10 +158,25 @@ status() {
 }
 
 bring_down() {
-  [[ $EUID -eq 0 ]] || die "must run as root"
+  require_root
 
+  # Flush the address BEFORE anything else. A bat0 left holding 192.168.60.x is
+  # the trap that ate a field session: the measurement scripts saw an interface
+  # that looked like the mesh and sent every probe into it. They check properly
+  # now, but leaving a dead interface addressed is still wrong.
+  ip addr flush dev "$BATIF" 2>/dev/null || true
   ip link set "$BATIF" down 2>/dev/null || true
-  batctl meshif "$BATIF" interface del "$IFACE" 2>/dev/null || true
+
+  if ip link show "$BATIF" >/dev/null 2>&1; then
+    batctl meshif "$BATIF" interface del "$IFACE" 2>/dev/null ||
+      log "warning: could not remove $IFACE from $BATIF"
+  fi
+
+  # Removing the last hard interface normally destroys the soft interface. Say
+  # so if it survives, rather than leaving it to be discovered in the field.
+  if ip link show "$BATIF" >/dev/null 2>&1; then
+    log "note: $BATIF still present, but down and unaddressed"
+  fi
 
   # Deliberately leaves the IBSS up and the module loaded: this tears down the
   # routing layer only, so the transport underneath can be tested on its own.

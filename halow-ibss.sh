@@ -18,8 +18,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=node-id.sh
-source "$ROOT/node-id.sh"
+# shellcheck source=halow-lib.sh
+source "$ROOT/halow-lib.sh"
+LOG_TAG=halow-ibss
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -27,8 +28,7 @@ source "$ROOT/node-id.sh"
 
 # Auto-detected by driver, so it works before and after the 10-halow.link
 # rename. Set IFACE explicitly to override.
-IFACE=${IFACE:-$(morse_iface)}
-IFACE=${IFACE:-wlan0}
+IFACE=${IFACE:-$(default_iface)}
 PHY=${PHY:-phy0}
 SSID=${SSID:-HaLow-IBSS}
 COUNTRY=${COUNTRY:-US}
@@ -45,11 +45,15 @@ COUNTRY=${COUNTRY:-US}
 CHANNEL=${CHANNEL:-33}
 OP_CLASS=${OP_CLASS:-68}
 
-# Derived: identity from the wlan0 MAC via bat-hosts, last octet from the hosts
+# Derived: identity from the radio MAC via bat-hosts, last octet from the hosts
 # file, against the IBSS subnet. Set NODE_IP explicitly to override, or when the
 # node is not listed in those files.
 IBSS_SUBNET=${IBSS_SUBNET:-192.168.50}
 NODE_NAME=${NODE_NAME:-$(node_name "$IFACE" "$ROOT/bat-hosts")}
+
+# Merged into /etc/hosts so the .ibss names resolve before batman-adv exists.
+# Set empty to skip.
+HOSTS=${HOSTS:-$ROOT/hosts}
 
 if [[ -z ${NODE_IP:-} ]]; then
   _bat_ip=$(node_ip "$NODE_NAME" "$ROOT/hosts")
@@ -71,16 +75,10 @@ CTRL_DIR=/run/wpa_supplicant_s1g
 
 # --------------------------------------------------------------------------
 
-log() { printf '[halow-ibss] %s\n' "$*" >&2; }
-die() {
-  printf '[halow-ibss] ERROR: %s\n' "$*" >&2
-  exit 1
-}
-
 preflight() {
-  [[ $EUID -eq 0 ]] || die "must run as root"
-  command -v "$WPA_S" >/dev/null || die "$WPA_S not found in PATH"
-  command -v iw >/dev/null || die "iw not found (apt install iw)"
+  require_root
+  require_cmd "$WPA_S"
+  require_cmd iw "apt install iw"
 
   iw phy "$PHY" info >/dev/null 2>&1 || die "$PHY not present; is morse.ko loaded?"
 
@@ -90,8 +88,38 @@ preflight() {
     die "$PHY does not advertise IBSS support"
   fi
 
+  check_rfkill
+
   mkdir -p "$WORKDIR" "$CTRL_DIR"
   chmod 700 "$WORKDIR"
+}
+
+# A soft block makes 'ip link set up' fail with "Operation not possible due to
+# RF-kill", usually because systemd-rfkill restored a blocked state across a
+# reboot. Clear it ourselves. A hard block is a platform GPIO -- the Morse
+# driver never asserts one -- so software cannot help there.
+check_rfkill() {
+  local dir idx
+
+  # The switch only exists once morse.ko has registered the phy, which is why
+  # this runs after the iw phy check and not earlier in boot.
+  for dir in /sys/class/ieee80211/"$PHY"/rfkill*; do
+    [[ -d $dir ]] || continue
+    idx=${dir##*/rfkill}
+
+    if [[ $(<"$dir/hard") == 1 ]]; then
+      die "$PHY is hard blocked by rfkill (platform switch/GPIO); cannot clear in software"
+    fi
+
+    [[ $(<"$dir/soft") == 1 ]] || continue
+    log "$PHY is soft blocked by rfkill; unblocking"
+    if command -v rfkill >/dev/null; then
+      rfkill unblock "$idx" || die "rfkill unblock $idx failed"
+    else
+      echo 0 >"$dir/soft" || die "could not clear soft block via $dir/soft"
+    fi
+    [[ $(<"$dir/soft") == 0 ]] || die "$PHY still soft blocked after unblock"
+  done
 }
 
 stop_supplicant() {
@@ -166,10 +194,22 @@ bring_up() {
     log "warning: could not preset type ibss; letting supplicant do it"
   ip link set "$IFACE" up
 
+  local merged
+  merged=$(merge_hosts "$HOSTS" "$IBSS_SUBNET")
+  [[ -n $merged ]] && log "merged $merged names into /etc/hosts (.lan and .ibss)"
+
   # Foreground with -d on first run is far more informative than backgrounding.
   # Set DEBUG=1 to get that.
+  #
+  # The supplicant holds the terminal until Ctrl-C, so the addressing below
+  # never runs. That is survivable, but it must not be silent: an unaddressed
+  # radio looks exactly like a peering failure, and the peer cannot ping in
+  # either.
   if [[ ${DEBUG:-0} == 1 ]]; then
     log "running in foreground with debug; Ctrl-C to stop"
+    log "NOTE: DEBUG=1 does not assign $NODE_IP -- $IFACE will have no address."
+    log "      After Ctrl-C, either re-run without DEBUG=1, or set it by hand:"
+    log "        ip addr add $NODE_IP dev $IFACE"
     "$WPA_S" -i "$IFACE" -c "$conf" -d
     return
   fi
@@ -181,7 +221,7 @@ bring_up() {
   ip addr flush dev "$IFACE"
   ip addr add "$NODE_IP" dev "$IFACE"
 
-  log "up. run '$0 status' here and on the peer."
+  log "up. $IFACE has $NODE_IP; run '$0 status' here and on the peer."
 }
 
 status() {
@@ -202,7 +242,7 @@ status() {
 }
 
 bring_down() {
-  [[ $EUID -eq 0 ]] || die "must run as root"
+  require_root
   stop_supplicant
   ip addr flush dev "$IFACE" 2>/dev/null || true
   ip link set "$IFACE" down 2>/dev/null || true
