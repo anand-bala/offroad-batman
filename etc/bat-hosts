@@ -1,8 +1,19 @@
-# batctl name table (cosmetic only): maps each node's RADIO MAC to a name so
-# `batctl o` / `batctl n` print names instead of hex. This gives no IP-level
-# reachability -- that is mDNS's job. Manually managed: add one line per node.
+# Node roster: maps each node's RADIO MAC to its name. Manually managed; add
+# one line per node. Two consumers, both driven off this one table:
+#
+#   batctl    prints names instead of hex in `batctl o` / `batctl n`.
+#             Cosmetic only -- gives no IP-level reachability.
+#   installer derives every node's mesh address from its MAC (EUI-64 against
+#             the shared ULA prefix) and writes <name>.mesh entries into
+#             /etc/hosts, and sets this node's hostname, which is what makes
+#             <name>.local resolvable over mDNS.
+#
+# Bare names, no domain suffix. The name is used verbatim as the system
+# hostname, so a suffix here becomes part of the hostname and then part of
+# every name derived from it.
 #
 # Format:  <radio-mac>            <name>
 # ----------------------------------------------
-0c:bf:74:00:5b:c8    olo.lan
-0c:bf:74:00:57:4a    wazza.lan
+0c:bf:74:00:5b:c8    olo
+0c:bf:74:00:57:4a    wazza
+0c:bf:74:00:5e:19    ragnarhorn
