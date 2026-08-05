@@ -12,9 +12,10 @@
 #   ethtool -i <iface> | head -2
 #   udevadm info /sys/class/net/<iface> | grep -E 'ID_NET_DRIVER|DRIVERS='
 #
-# It is usually the module name (morse); the USB driver registers separately as
-# morse_usb (morse/morse_driver/usb.c:1212). If ID_NET_DRIVER says morse_usb,
-# change Driver= below to match.
+# The module is named morse, but the USB driver registers separately as
+# morse_usb (morse/morse_driver/usb.c:1212), and that is what udev reports for
+# the M.2 card: ID_NET_DRIVER=morse_usb. Driver= takes a whitespace-separated
+# list, so both are matched and the same file works on USB, SDIO and SPI nodes.
 #
 # Install:
 #   sudo install -m 0644 10-halow.link /etc/systemd/network/10-halow.link
@@ -26,7 +27,7 @@
 #   udevadm test-builtin net_setup_link /sys/class/net/<iface>
 
 [Match]
-Driver=morse
+Driver=morse morse_usb
 
 [Link]
 # Deliberately not wlan0. systemd warns against renaming into the kernel's own
