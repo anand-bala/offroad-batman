@@ -91,8 +91,8 @@ The radio reports S1G channels as their 5 GHz equivalents,
 so `iw dev` showing `channel 100 (5500 MHz), width: 160 MHz`
 for an 8 MHz S1G channel is expected.
 
-For encrypted IBSS, replace `key_mgmt=NONE` with the RSN block from `halow-ibss.sh`
-and use the same PSK fleet-wide.
+For encrypted IBSS, replace `key_mgmt=NONE` with the RSN block commented out in
+`etc/wpa_supplicant/wpa_supplicant-halow0.conf` and use the same PSK fleet-wide.
 Note this is RSN-IBSS, not SAE -- see the security notes in `README.md`.
 
 ## 4. Batman-Adv on Top
