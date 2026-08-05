@@ -34,10 +34,14 @@ morse_iface() {
 # the Morse card to phy1 or higher. It is not stable across module reloads
 # either: unloading and reloading morse.ko moves the card to the next free
 # index. Reading it back from the netdev is the only reliable answer.
+# Plain readlink, not readlink -f: -f canonicalises a path whose final
+# component does not exist, so a non-wireless interface would yield the
+# literal string "phy80211" rather than nothing.
 morse_phy() {
   local iface=$1 link
   [[ -n $iface ]] || return 0
-  link=$(readlink -f "/sys/class/net/$iface/phy80211" 2>/dev/null || true)
+  [[ -L /sys/class/net/$iface/phy80211 ]] || return 0
+  link=$(readlink "/sys/class/net/$iface/phy80211" 2>/dev/null || true)
   [[ -n $link ]] && basename "$link"
   return 0
 }
