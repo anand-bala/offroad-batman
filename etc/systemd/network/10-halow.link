@@ -1,36 +1,10 @@
-# Give the Morse HaLow radio a stable name. Install to
-# /etc/systemd/network/10-halow.link on every node.
+# Rename the Morse Micro S1G radio to a stable, collision-proof name.
+# Matches any morse* driver (native and USB variants); "halow0" is outside the
+# kernel's own wlan* namespace, so it can never race the kernel for a name.
 #
-# The card is USB, so predictable naming hands it a MAC-derived name like
-# wlx0cbf74005bc8 -- different on every node, which makes fleet-wide scripts
-# and config impossible to share.
-#
-# Matching on the driver rather than the MAC is what keeps this file identical
-# across all four Jetsons. Confirm the driver name reported for the netdev
-# before trusting it:
-#
-#   ethtool -i <iface> | head -2
-#   udevadm info /sys/class/net/<iface> | grep -E 'ID_NET_DRIVER|DRIVERS='
-#
-# Confirmed morse_usb on this hardware -- the name the USB driver registers at
-# morse/morse_driver/usb.c:1212, not the module name.
-#
-# Install:
-#   sudo install -m 0644 10-halow.link /etc/systemd/network/10-halow.link
-#   sudo udevadm control --reload
-#   sudo update-initramfs -u        # only if morse.ko is pulled into initrd
-#   reboot, or unplug/replug the card
-#
-# Verify:
-#   udevadm test-builtin net_setup_link /sys/class/net/<iface>
-
+# Sorts before /usr/lib/systemd/network/99-default.link, so this wins.
 [Match]
-Driver=morse_usb
+Driver=morse*
 
 [Link]
-# Deliberately not wlan0. systemd warns against renaming into the kernel's own
-# namespace (eth*, wlan*), because the kernel may hand that name to another
-# device before the rename lands, and the rename then fails intermittently --
-# a miserable failure mode on a node you cannot reach. halow0 is outside that
-# namespace and cannot collide.
 Name=halow0

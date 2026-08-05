@@ -1,0 +1,55 @@
+[Unit]
+Description=HaLow radio (halow0) into IBSS mode
+Documentation=man:wpa_supplicant(8)
+# Tie this unit's life to the renamed device; stop if the radio disappears.
+BindsTo=sys-subsystem-net-devices-halow0.device
+After=sys-subsystem-net-devices-halow0.device
+# rfkill state is restored late in boot -- clear it after that has happened.
+After=systemd-rfkill.service
+
+[Service]
+Type=simple
+
+# Commands are named, not absolute. systemd resolves a bare name against its
+# own fixed search path, which leads with /usr/local/sbin -- where
+# build_dependencies.sh puts wpa_supplicant_s1g -- and covers the
+# /sbin-vs-/usr/sbin split for iw, ip and rfkill. Hardcoding one spelling means
+# a wrong guess fails at runtime on the node, which is exactly what the '-'
+# prefixes used to hide.
+#
+# The '-' prefixes are gone from everything that must actually work. A silently
+# skipped 'iw reg set' is an out-of-spec radio that still appears to come up.
+
+# ctrl_interface in the conf points here; let systemd own it (and clean it up)
+# rather than relying on the supplicant to mkdir it.
+RuntimeDirectory=wpa_supplicant_s1g
+RuntimeDirectoryMode=0750
+
+# Clear any restored SOFT rfkill block. Succeeds when nothing is blocked. A
+# HARD block is a platform GPIO and cannot be cleared in software; the Morse
+# driver never asserts one.
+ExecStartPre=rfkill unblock wlan
+
+# Regulatory domain, then the mode preset.
+ExecStartPre=iw reg set US
+ExecStartPre=ip link set halow0 down
+# Still best-effort: the supplicant sets the type authoritatively via mode=1,
+# so a driver that rejects the preset can still reach a working IBSS.
+ExecStartPre=-iw dev halow0 set type ibss
+ExecStartPre=ip link set halow0 up
+
+# Best-effort MTU bump so bat0 lands at a clean 1500. The Morse driver may
+# reject an oversized MTU; if so this is ignored and bat0 is simply smaller.
+ExecStartPre=-ip link set halow0 mtu 1532
+
+# The Morse fork of wpa_supplicant performs the real IBSS join (open or RSN,
+# per the conf). Runs in the foreground; systemd supervises and restarts it.
+ExecStart=wpa_supplicant_s1g -i halow0 -c /etc/wpa_supplicant/wpa_supplicant-halow0.conf
+
+Restart=on-failure
+RestartSec=3
+
+# Note: this unit is normally pulled in by the udev rule
+# (90-halow-mesh.rules) when the radio appears, which is robust to the radio
+# enumerating after networkd/multi-user. No [Install] section on purpose.
+

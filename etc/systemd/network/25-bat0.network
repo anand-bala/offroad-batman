@@ -1,0 +1,31 @@
+# L3 + naming for the mesh.
+#
+# IPv6 ULA only: static, self-derived, no router advertisements (there may be
+# no gateway) and no DHCP. mDNS makes <hostname>.local resolvable peer-to-peer
+# across the mesh, so the actual address value never has to be typed by a human.
+#
+# ############################  PER-NODE  ##############################
+# Replace the host suffix in Address= below.
+#   * The /48 PREFIX (fd12:3456:789a::) MUST be identical on every node.
+#     Generate it ONCE at random (RFC 4193) for the whole fleet.
+#     A per-node prefix silently splits the fleet into unreachable subnets.
+#   * The SUFFIX is unique per node -- derive it EUI-64 style from the radio's
+#     permanent MAC so it is deterministic and collision-free.
+# #####################################################################
+
+[Match]
+Name=bat0
+
+[Network]
+# HARED prefix, PER-NODE suffix
+Address=fd12:3456:789a::1/64
+IPv6AcceptRA=no
+LinkLocalAddressing=ipv6
+MulticastDNS=yes
+DHCP=no
+
+[Link]
+# Assign the address even on a "mesh of one" (no peers yet), rather than
+# waiting for carrier that only appears once a neighbour shows up.
+ConfigureWithoutCarrier=yes
+

@@ -1,0 +1,29 @@
+[Unit]
+Description=Attach halow0 to the batman-adv mesh (bat0)
+# The radio must be in IBSS and joined before it is worth attaching.
+Requires=halow0-ibss.service
+After=halow0-ibss.service
+# bat0 is created by networkd from 25-bat0.netdev. Ordering against the service
+# is not enough: networkd being "started" says nothing about the netdev having
+# been created yet, and this is a Type=oneshot with no Restart=, so a single
+# lost race leaves the mesh unattached until the next reboot. Depend on the
+# device unit itself, which only appears once the netdev really exists.
+Requires=sys-subsystem-net-devices-bat0.device
+After=sys-subsystem-net-devices-bat0.device
+After=systemd-networkd.service
+# Share the radio's lifecycle.
+BindsTo=sys-subsystem-net-devices-halow0.device
+After=sys-subsystem-net-devices-halow0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Enslave the radio to the mesh. batman-adv starts using it immediately; if it
+# has no peers yet, bat0 is simply a mesh of one until a neighbour appears.
+ExecStart=/sbin/ip link set halow0 master bat0
+# On teardown, detach cleanly (leaves the radio in IBSS for direct testing).
+ExecStop=-/sbin/ip link set halow0 nomaster
+
+[Install]
+WantedBy=multi-user.target
+

@@ -1,0 +1,21 @@
+# Create the batman-adv soft interface. Creating this netdev loads the
+# batman-adv module on demand.
+#
+# RoutingAlgorithm is immutable after creation and MUST match on every node.
+# batman-iv is the safe choice: batman-v picks routes by estimated throughput,
+# which leans on the S1G driver reporting sane rate info -- not something to
+# assume on hardware this new. (networkd defaults to batman-v, so setting this
+# explicitly matters.)
+#
+# GatewayMode=off: naming is peer-to-peer (mDNS) and addressing is static, so
+# there is no DHCP to steer and no reason to elect a gateway here. The uplink
+# router, when present, is reached by an ordinary default route, independent of
+# batman's gateway machinery.
+
+[NetDev]
+Name=bat0
+Kind=batadv
+
+[BatmanAdvanced]
+RoutingAlgorithm=batman-iv
+GatewayMode=off

@@ -1,2 +1,8 @@
+# batctl name table (cosmetic only): maps each node's RADIO MAC to a name so
+# `batctl o` / `batctl n` print names instead of hex. This gives no IP-level
+# reachability -- that is mDNS's job. Manually managed: add one line per node.
+#
+# Format:  <radio-mac>            <name>
+# ----------------------------------------------
 0c:bf:74:00:5b:c8    olo.lan
 0c:bf:74:00:57:4a    wazza.lan

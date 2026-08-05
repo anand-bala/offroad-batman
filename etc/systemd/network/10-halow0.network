@@ -1,0 +1,9 @@
+# Hand halow0 entirely to the halow0-ibss / halow0-attach services.
+# networkd must NOT bring it up, address it, or otherwise fight the supplicant
+# over the radio's state. It only owns bat0.
+
+[Match]
+Name=halow0
+
+[Link]
+Unmanaged=yes

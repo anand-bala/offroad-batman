@@ -1,0 +1,12 @@
+# Safety net for late radio enumeration. When the Morse net device appears,
+# pull in BOTH mesh services, so it does not matter whether networkd or
+# multi-user.target got there first. The rename to halow0 (via 10-halow.link)
+# happens in the same udev pass; the units then BindsTo the halow0 device.
+#
+# halow0-attach must be listed here too, not just left to its WantedBy. The USB
+# radio can enumerate after multi-user.target, and at that point attach's
+# BindsTo= on the (still absent) halow0 device is unsatisfiable, so it is
+# skipped and nothing retriggers it once the device shows up -- leaving a radio
+# joined to the IBSS but never enslaved to bat0.
+
+ACTION=="add", SUBSYSTEM=="net", ENV{ID_NET_DRIVER}=="morse*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="halow0-ibss.service halow0-attach.service"
