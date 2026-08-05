@@ -41,10 +41,10 @@ HOSTS_END="# END halow-batman"
 # Derived from the hosts file via this node's identity. Replaces the address
 # halow-ibss.sh put on wlan0: once batman-adv owns the interface, wlan0 must
 # carry no IP of its own, or traffic bypasses the mesh routing entirely.
-NODE_NAME=${NODE_NAME:-$(node_name "$IFACE" "$ROOT/bat-hosts")}
+NODE_NAME=${NODE_NAME:-$(node_name "$IFACE" "$BAT_HOSTS")}
 
 if [[ -z ${BAT_IP:-} ]]; then
-  _ip=$(node_ip "$NODE_NAME" "$ROOT/hosts")
+  _ip=$(node_ip "$NODE_NAME" "$HOSTS")
   # Left empty when the lookup fails; preflight() reports it. Defaulting to
   # .1 would silently collide with whichever node legitimately holds it.
   if [[ -n $_ip ]]; then
@@ -87,7 +87,7 @@ preflight() {
   ip link show "$IFACE" >/dev/null 2>&1 || die "$IFACE does not exist"
 
   if [[ -z ${BAT_IP:-} ]]; then
-    die "no bat0 address for this node: MAC $(cat "/sys/class/net/$IFACE/address" 2>/dev/null || echo '?') is not in $ROOT/bat-hosts, or '$NODE_NAME' is not in $ROOT/hosts. Add the node to both files, or set BAT_IP=<addr>/24."
+    die "no bat0 address for this node: MAC $(cat "/sys/class/net/$IFACE/address" 2>/dev/null || echo '?') is not in $BAT_HOSTS, or '$NODE_NAME' is not in $HOSTS. Add the node to both files, or set BAT_IP=<addr>/24."
   fi
 
   # batman-adv will happily run over an interface with no peers and give you a

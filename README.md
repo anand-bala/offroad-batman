@@ -163,7 +163,7 @@ identity and addressing derive from the MAC; see
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `IFACE` / `PHY` | auto-detected / `phy0` | Found by driver; see [Interface naming](#interface-naming) |
+| `IFACE` / `PHY` | auto-detected / derived from the interface | Found by driver; see [Interface naming](#interface-naming) |
 | `SSID` | `HaLow-IBSS` | Must match fleet-wide |
 | `CHANNEL` / `OP_CLASS` | `33` / `68` (1 MHz @ 918.5 MHz) | Must match fleet-wide |
 | `FREQ` | unset | Fallback: emits `frequency=` instead of `channel`/`op_class` |

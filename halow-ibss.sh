@@ -85,8 +85,11 @@ preflight() {
   command -v "$WPA_S" >/dev/null || die "$WPA_S not found in PATH"
   command -v iw >/dev/null || die "iw not found (apt install iw)"
 
-  if [[ -z ${NODE_IP:-} ]]; then
-    die "no address for this node: MAC $(cat "/sys/class/net/$IFACE/address" 2>/dev/null || echo '?') is not in $ROOT/bat-hosts, or '$NODE_NAME' is not in $ROOT/hosts. Add the node to both files, or set NODE_IP=<addr>/24."
+  # DEBUG=1 runs the supplicant in the foreground and returns before any
+  # address is assigned, so it must stay usable on a node that is not yet in
+  # the tables -- it is the first command the README tells you to run.
+  if [[ ${DEBUG:-0} != 1 && -z ${NODE_IP:-} ]]; then
+    die "no address for this node: MAC $(cat "/sys/class/net/$IFACE/address" 2>/dev/null || echo '?') is not in $ROOT/bat-hosts, or '$NODE_NAME' is not in $ROOT/hosts. Add the node to both files, set NODE_IP=<addr>/24, or use DEBUG=1 to bring the radio up without an address."
   fi
 
   iw phy "$PHY" info >/dev/null 2>&1 || die "$PHY not present; is morse.ko loaded?"

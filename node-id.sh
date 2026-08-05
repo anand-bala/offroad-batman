@@ -38,7 +38,7 @@ morse_iface() {
 # component does not exist, so a non-wireless interface would yield the
 # literal string "phy80211" rather than nothing.
 morse_phy() {
-  local iface=$1 link
+  local iface=${1:-} link
   [[ -n $iface ]] || return 0
   [[ -L /sys/class/net/$iface/phy80211 ]] || return 0
   link=$(readlink "/sys/class/net/$iface/phy80211" 2>/dev/null || true)
