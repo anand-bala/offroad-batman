@@ -1,9 +1,0 @@
-# Name -> bat0 address. Merged into /etc/hosts by halow-batman.sh, inside a
-# marked block so the rest of the file is left alone.
-#
-# These are bat0 addresses, not wlan0 ones: once batman-adv owns the radio,
-# wlan0 carries no IP. Keep in step with BAT_IP on each node, and with
-# bat-hosts, which maps the same names at layer 2.
-
-192.168.60.1      olo.lan      olo
-192.168.60.2      wazza.lan    wazza
