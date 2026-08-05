@@ -45,7 +45,11 @@ NODE_NAME=${NODE_NAME:-$(node_name "$IFACE" "$ROOT/bat-hosts")}
 
 if [[ -z ${BAT_IP:-} ]]; then
   _ip=$(node_ip "$NODE_NAME" "$ROOT/hosts")
-  BAT_IP="${_ip:-192.168.60.1}/24"
+  # Left empty when the lookup fails; preflight() reports it. Defaulting to
+  # .1 would silently collide with whichever node legitimately holds it.
+  if [[ -n $_ip ]]; then
+    BAT_IP="$_ip/24"
+  fi
 fi
 
 # server on the node with the uplink (the travel router), client on the rest,
@@ -81,6 +85,10 @@ preflight() {
     || die "batman-adv module not available; see README.md"
 
   ip link show "$IFACE" >/dev/null 2>&1 || die "$IFACE does not exist"
+
+  if [[ -z ${BAT_IP:-} ]]; then
+    die "no bat0 address for this node: MAC $(cat "/sys/class/net/$IFACE/address" 2>/dev/null || echo '?') is not in $ROOT/bat-hosts, or '$NODE_NAME' is not in $ROOT/hosts. Add the node to both files, or set BAT_IP=<addr>/24."
+  fi
 
   # batman-adv will happily run over an interface with no peers and give you a
   # mesh of one, which looks healthy and forwards nothing. Warn rather than

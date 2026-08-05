@@ -57,9 +57,10 @@ if [[ -z ${NODE_IP:-} ]]; then
   _bat_ip=$(node_ip "$NODE_NAME" "$ROOT/hosts")
   if [[ -n $_bat_ip ]]; then
     NODE_IP="$IBSS_SUBNET.${_bat_ip##*.}/24"
-  else
-    NODE_IP=192.168.50.1/24
   fi
+  # Deliberately left empty when the lookup fails. preflight() turns that into
+  # a clear error; defaulting here would hand an unregistered node the .1
+  # address that already belongs to another node.
 fi
 
 # Only used by up-rsn. Generate with: openssl rand -base64 24
@@ -83,6 +84,10 @@ preflight() {
   [[ $EUID -eq 0 ]] || die "must run as root"
   command -v "$WPA_S" >/dev/null || die "$WPA_S not found in PATH"
   command -v iw >/dev/null || die "iw not found (apt install iw)"
+
+  if [[ -z ${NODE_IP:-} ]]; then
+    die "no address for this node: MAC $(cat "/sys/class/net/$IFACE/address" 2>/dev/null || echo '?') is not in $ROOT/bat-hosts, or '$NODE_NAME' is not in $ROOT/hosts. Add the node to both files, or set NODE_IP=<addr>/24."
+  fi
 
   iw phy "$PHY" info >/dev/null 2>&1 || die "$PHY not present; is morse.ko loaded?"
 
