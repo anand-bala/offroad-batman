@@ -27,6 +27,21 @@ morse_iface() {
   return 0
 }
 
+# morse_phy <iface> -- the wiphy that netdev belongs to.
+#
+# Not necessarily phy0. The index is handed out in registration order, so any
+# node with a second wireless device (an onboard card, a USB dongle) can push
+# the Morse card to phy1 or higher. It is not stable across module reloads
+# either: unloading and reloading morse.ko moves the card to the next free
+# index. Reading it back from the netdev is the only reliable answer.
+morse_phy() {
+  local iface=$1 link
+  [[ -n $iface ]] || return 0
+  link=$(readlink -f "/sys/class/net/$iface/phy80211" 2>/dev/null || true)
+  [[ -n $link ]] && basename "$link"
+  return 0
+}
+
 # node_name <iface> <bat_hosts_file>
 node_name() {
   local iface=$1 bat_hosts=$2 mac name

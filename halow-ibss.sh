@@ -29,6 +29,8 @@ source "$ROOT/node-id.sh"
 # rename. Set IFACE explicitly to override.
 IFACE=${IFACE:-$(morse_iface)}
 IFACE=${IFACE:-wlan0}
+# Derived from the interface, not assumed to be phy0 -- see morse_phy().
+PHY=${PHY:-$(morse_phy "$IFACE")}
 PHY=${PHY:-phy0}
 SSID=${SSID:-HaLow-IBSS}
 COUNTRY=${COUNTRY:-US}
