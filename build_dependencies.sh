@@ -259,6 +259,7 @@ APT_DEPS=(
   batctl
   wireless-tools
   iw
+  libnss-resolve
 )
 
 missing=()
