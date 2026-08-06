@@ -73,6 +73,30 @@ dkms_pkg_id() {
   echo "$name $version"
 }
 
+# Clear any previous registration of <name>/<version> so that a re-run is a
+# no-op rather than "Error! DKMS tree already contains". Returns 0 if there was
+# something to remove.
+#
+# `dkms status` alone is not enough of a check: the bookkeeping under
+# /var/lib/dkms/<name>/<version> is what `dkms add` refuses to overwrite, and it
+# outlives both the staged sources and (on some dkms versions) status reporting
+# the module at all. Test for it directly, and sweep up whatever `dkms remove`
+# leaves behind -- it declines to finish the job when the source tree it wants to
+# consult is already gone.
+dkms_deregister() {
+  local pkg_name="${1:?package name not provided}"
+  local pkg_version="${2:?package version not provided}"
+
+  if dkms status -m "$pkg_name" -v "$pkg_version" 2>/dev/null | grep -q . ||
+    [[ -d /var/lib/dkms/$pkg_name/$pkg_version ]]; then
+    log "Removing previous DKMS registration of ${pkg_name}/${pkg_version}"
+    as_root dkms remove -m "$pkg_name" -v "$pkg_version" --all || true
+    as_root rm -rf "/var/lib/dkms/$pkg_name/$pkg_version"
+    return 0
+  fi
+  return 1
+}
+
 install_dkms_pkg() {
   local drv_path="${1:?dkms directory not provided}"
   local id pkg_name pkg_version dkms_src
@@ -87,6 +111,10 @@ install_dkms_pkg() {
   id=$(dkms_pkg_id "$drv_path")
   read -r pkg_name pkg_version <<<"$id"
   dkms_src=/usr/src/${pkg_name}-${pkg_version}
+
+  # Before restaging, not after: dkms's own removal wants the sources it was
+  # registered against still in place.
+  dkms_deregister "$pkg_name" "$pkg_version" || true
 
   # DKMS wants the sources under /usr/src/<name>-<version>. Copy rather than
   # symlink: dkms resolves the tree at build time on every kernel upgrade, and a
@@ -103,11 +131,6 @@ install_dkms_pkg() {
   # No -type d: a submodule's .git is a *file* pointing back at this checkout's
   # .git/modules, which would dangle the moment the checkout moves.
   as_root find "$dkms_src" -name .git -prune -exec rm -rf {} +
-
-  if dkms status -m "$pkg_name" -v "$pkg_version" 2>/dev/null | grep -q .; then
-    log "Removing previous DKMS registration of ${pkg_name}/${pkg_version}"
-    as_root dkms remove -m "$pkg_name" -v "$pkg_version" --all || true
-  fi
 
   log "Building and installing via DKMS..."
   as_root dkms add -m "$pkg_name" -v "$pkg_version"
@@ -128,12 +151,8 @@ uninstall_dkms_pkg() {
   id=$(dkms_pkg_id "$drv_path")
   read -r pkg_name pkg_version <<<"$id"
 
-  if dkms status -m "$pkg_name" -v "$pkg_version" 2>/dev/null | grep -q .; then
-    log "Removing ${pkg_name}/${pkg_version} from DKMS (all kernels)..."
-    as_root dkms remove -m "$pkg_name" -v "$pkg_version" --all || true
-  else
+  dkms_deregister "$pkg_name" "$pkg_version" ||
     log "${pkg_name}/${pkg_version} is not registered with DKMS"
-  fi
   as_root rm -rf "/usr/src/${pkg_name}-${pkg_version}"
 }
 
