@@ -1,4 +1,4 @@
-# Na Na Na Na Na Na Na Na Offroad B.a.t.m.a.n
+# Na Na Na Na Na Na Na Na Offroad B.A.T.M.A.N
 
 A HaLow (802.11ah) mesh for four Jetson nodes plus an OpenWrt travel router
 as the gateway.
