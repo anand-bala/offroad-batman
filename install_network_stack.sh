@@ -4,7 +4,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-SCRIPT_NAME="$0"
 
 # --------------------------------------------------------------------------------
 # Preamble
@@ -105,9 +104,10 @@ halow_iface() {
 # component does not exist, so a non-wireless interface would yield the
 # literal string "phy80211" rather than nothing.
 halow_phy() {
-  local iface="${1?missing \'iface\' argument, aborting}"
+  local iface link
+  iface="${1?missing \'iface\' argument, aborting}"
   [[ -L /sys/class/net/$iface/phy80211 ]] || return 0
-  local link=$(readlink "/sys/class/net/$iface/phy80211" 2>/dev/null || true)
+  link=$(readlink "/sys/class/net/$iface/phy80211" 2>/dev/null || true)
   [[ -n $link ]] && basename "$link"
   return 0
 }
