@@ -263,7 +263,11 @@ take_probe() {
     printf '%s\n' "$LAST_RAW" >>"$RAW_SINK"
   fi
 
-  {
+  # Process substitution, not a pipe. `... | kv_load` runs kv_load in a subshell
+  # (bash does this for every pipeline element without `shopt -s lastpipe`), so
+  # P would be populated in a child that then exits and every reading would come
+  # back empty -- silently, as blank CSV columns rather than an error.
+  kv_load < <(
     printf '%s\n' "$LAST_RAW" | probe_section PROBE_TS |
       awk 'NF {print "probe_ts=" $1; exit}'
     printf '%s\n' "$LAST_RAW" | probe_section STATION | parse_station "$PEER_MAC"
@@ -272,7 +276,7 @@ take_probe() {
       parse_originators "$(peer_orig_key)"
     printf '%s\n' "$LAST_RAW" | probe_section PING | parse_ping
     printf '%s\n' "$LAST_RAW" | probe_section CHRONY | parse_chrony
-  } | kv_load
+  )
 }
 
 # peer_orig_key -- how the peer appears in the originator table.
@@ -441,12 +445,13 @@ mode_status() {
       continue
     fi
 
-    {
+    # Process substitution, not a pipe -- see take_probe.
+    kv_load < <(
       printf '%s\n' "${RAW[$n]}" | probe_section STATION | parse_station ""
       printf '%s\n' "${RAW[$n]}" | probe_section SURVEY | parse_survey
       printf '%s\n' "${RAW[$n]}" | probe_section ORIGINATORS | parse_originators ""
       printf '%s\n' "${RAW[$n]}" | probe_section CHRONY | parse_chrony
-    } | kv_load
+    )
 
     printf '  %-14s %-26s %-7s %-6s %-6s %-5s %-6s %s\n' \
       "$n" "${addr:-?}" "yes" \
