@@ -282,11 +282,14 @@ take_probe() {
 # peer_orig_key -- how the peer appears in the originator table.
 #
 # batctl substitutes names from /etc/bat-hosts when it has them and prints raw
-# hex when it does not, and the two cases are indistinguishable from here. Feed
-# it the MAC, which is what an unsubstituted table holds; a table that IS
-# substituted falls back to the best-route reading, which is correct whenever
-# the fleet is a pair and approximately right otherwise.
-peer_orig_key() { printf '%s' "$PEER_MAC"; }
+# hex when it does not, and the two cases are indistinguishable from here. So
+# feed it BOTH spellings and let parse_originators match whichever the table
+# actually used.
+#
+# Passing only the MAC, as this did, matched nothing on any node that has run
+# the installer -- which is every node, since the installer is what writes
+# bat-hosts. tq, nexthop and direct were empty in every walk and soak row.
+peer_orig_key() { printf '%s,%s' "$PEER_MAC" "$PEER"; }
 
 rotate_if_big() {
   local f=$1 sz

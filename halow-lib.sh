@@ -562,9 +562,25 @@ parse_survey() {
 #
 # With a named peer this reports that peer's route. Without one it reports the
 # best available, which is the same thing only while exactly two nodes are up.
+# parse_originators [<key>[,<key>...]] -- the best route to a peer.
+#
+# The key is a COMMA-SEPARATED SET, because the same peer appears in the table
+# under two different spellings and which one you get is not knowable from
+# here. batctl substitutes names out of /etc/bat-hosts when it has them and
+# prints raw hex when it does not, so a caller that knows only the MAC misses
+# every row of a substituted table -- silently, as an empty tq rather than an
+# error. Pass both the MAC and the roster name and let whichever exists match.
+#
+# An empty key means "the best route to anywhere", which is what `status` wants
+# and is only equivalent to a named peer when the fleet is a pair.
 parse_originators() {
   local peer=${1:-}
   awk -v want="${peer,,}" '
+    BEGIN {
+      nw = split(want, wl, /,/)
+      for (wi = 1; wi <= nw; wi++)
+        if (wl[wi] != "") WANT[wl[wi]] = 1
+    }
     function tqof(line,   v) {
       if (match(line, /\([ ]*[0-9]+\)/)) {
         v = substr(line, RSTART + 1, RLENGTH - 2)
@@ -590,7 +606,7 @@ parse_originators() {
       for (i = 3; i <= n; i++) if (f[i] ~ /^\(/ || f[i] ~ /\)$/) { nh = f[i+1]; break }
       if (best) {
         count++
-        if (want == "" || orig == want) {
+        if (want == "" || (orig in WANT)) {
           if (want != "" || tq > bt) { bt = tq; bnh = nh; bls = lastseen; bo = orig }
         }
       }
