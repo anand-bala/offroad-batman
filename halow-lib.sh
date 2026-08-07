@@ -370,22 +370,43 @@ probe_script() {
   local ping_timeout="${4:-1}"
 
   cat <<EOF
+# priv -- run a reader with privilege when we can get it without asking.
+#
+# batctl refuses outright without root, and iw's survey dump reports noise and
+# channel-busy only to root: unprivileged they come back empty, which looks
+# exactly like a driver that does not report them. Both were silently blank in
+# every row until this was added.
+#
+# -n is the whole point: it fails immediately instead of prompting. A probe
+# runs once a second inside a walk and over BatchMode ssh, so a password prompt
+# would hang the sampler rather than ask anyone anything.
+#
+# Falls back to running unprivileged, so a node with no sudo rights keeps
+# working exactly as it did before rather than losing the readings that never
+# needed root -- station dump among them.
+priv() {
+  if [ "\$(id -u)" = 0 ]; then
+    "\$@"
+  else
+    sudo -n "\$@" 2>/dev/null || "\$@"
+  fi
+}
 echo "==PROBE_TS=="
 date +%s.%N 2>/dev/null || date +%s
 echo "==STATION=="
 iw dev $iface station dump 2>/dev/null || true
 echo "==SURVEY=="
-iw dev $iface survey dump 2>/dev/null || true
+priv iw dev $iface survey dump 2>/dev/null || true
 echo "==LINKINFO=="
 iw dev $iface info 2>/dev/null || true
 echo "==ORIGINATORS=="
-batctl meshif $meshif originators 2>/dev/null || true
+priv batctl meshif $meshif originators 2>/dev/null || true
 echo "==NEIGHBORS=="
-batctl meshif $meshif neighbors 2>/dev/null || true
+priv batctl meshif $meshif neighbors 2>/dev/null || true
 echo "==GATEWAYS=="
-batctl meshif $meshif gwl 2>/dev/null || true
+priv batctl meshif $meshif gwl 2>/dev/null || true
 echo "==BATSTATS=="
-batctl meshif $meshif statistics 2>/dev/null || true
+priv batctl meshif $meshif statistics 2>/dev/null || true
 echo "==CHRONY=="
 chronyc tracking 2>/dev/null || true
 echo "==PING=="

@@ -577,7 +577,8 @@ mode_at() {
     fi
   fi
 
-  run_on_node "morse_cli -i $IFACE stats" >"$base.morse-stats" 2>&1
+  run_on_node "sudo -n morse_cli -i $IFACE stats 2>/dev/null ||
+    morse_cli -i $IFACE stats" >"$base.morse-stats" 2>&1
 
   if [[ ! -f $out ]]; then
     echo "timestamp,node,peer,distance_m,bw_mhz,height_m,rssi_avg,rssi_min,rssi_max,samples,noise_dbm,snr_db,busy_pct,retry_rate,loss_pct,rtt_ms,batman_tq,direct,mbps,channel,width,note" \
@@ -1016,7 +1017,10 @@ mode_soak() {
 
     # batman counters, long format -- one metric per row, so a new counter in a
     # future batctl adds rows rather than breaking a column mapping.
-    run_on_node "batctl meshif $MESHIF statistics" 2>/dev/null |
+    # Same privilege dance as probe_script's priv(), inlined: this is its own
+    # `sh -c` on the far end and does not inherit that helper.
+    run_on_node "sudo -n batctl meshif $MESHIF statistics 2>/dev/null ||
+      batctl meshif $MESHIF statistics" 2>/dev/null |
       awk -v t="$(date +%s.%N)" -v n="$NODE" '
         { k = $1; v = $NF; gsub(/:/, "", k)
           if (k != "" && v ~ /^[0-9]+$/) print t "," n "," k "," v }' >>"$stats"
