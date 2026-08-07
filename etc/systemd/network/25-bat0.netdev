@@ -7,10 +7,14 @@
 # assume on hardware this new. (networkd defaults to batman-v, so setting this
 # explicitly matters.)
 #
-# GatewayMode=off: naming is peer-to-peer (mDNS) and addressing is static, so
-# there is no DHCP to steer and no reason to elect a gateway here. The uplink
-# router, when present, is reached by an ordinary default route, independent of
-# batman's gateway machinery.
+# GatewayMode=client: the router announces itself as a batman gateway, and this
+# marks the node as a consumer of one. Note what this does and does not buy:
+# batman's gateway election steers DHCP, and this mesh has none (addressing is
+# static, naming is mDNS), so it will NOT install a default route by itself.
+# The route comes from Gateway= in 25-bat0.network. What client mode does give
+# is `batctl gwl` showing the elected gateway, which is the check that says
+# whether the mesh can see the uplink at all -- worth having even though the
+# routing is done by hand.
 
 [NetDev]
 Name=bat0
@@ -18,4 +22,4 @@ Kind=batadv
 
 [BatmanAdvanced]
 RoutingAlgorithm=batman-iv
-GatewayMode=off
+GatewayMode=client

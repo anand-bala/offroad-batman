@@ -1,8 +1,12 @@
 # L3 + naming for the mesh.
 #
-# IPv6 ULA only: static, self-derived, no router advertisements (there may be
-# no gateway) and no DHCP. mDNS makes <hostname>.local resolvable peer-to-peer
-# across the mesh, so the actual address value never has to be typed by a human.
+# IPv6 ULA only: static, self-derived, no router advertisements and no DHCP.
+# mDNS makes <hostname>.local resolvable peer-to-peer across the mesh, so the
+# actual address value never has to be typed by a human.
+#
+# IPv6 ONLY -- there is no IPv4 on this interface, by design. Nothing on the
+# mesh can reach an IPv4 literal, so `ping 8.8.8.8` fails here even with the
+# uplink perfectly healthy. Use the v6 resolvers; see README.md.
 #
 # ############################  PER-NODE  ##############################
 # Replace the host suffix in Address= below.
@@ -17,12 +21,30 @@
 Name=bat0
 
 [Network]
-# HARED prefix, PER-NODE suffix
+# SHARED prefix, PER-NODE suffix
 Address=fd12:3456:789a::1/64
 IPv6AcceptRA=no
 LinkLocalAddressing=ipv6
 MulticastDNS=yes
 DHCP=no
+
+# The uplink. Stamped by install_network_stack.sh from the roster entry named
+# by $GATEWAY_NAME, so it tracks a ULA_PREFIX override instead of drifting from
+# it. IPv6AcceptRA=no above means nothing else will ever install a default
+# route on this link -- without this line the mesh has no way out, which is
+# exactly the "Network is unreachable" that sent us looking.
+#
+# Not conditional on the router being up: a default route pointing at an absent
+# gateway costs nothing, and batman reconverges on its own when it returns.
+Gateway=fd12:3456:789a::1
+
+# Resolvers must be reachable over the mesh, i.e. IPv6 and routed through the
+# gateway above. The v4 addresses everyone has memorised are useless here.
+# Google and Cloudflare respectively; Domains=~. sends non-.local, non-.mesh
+# lookups this way rather than to whatever eth0 last advertised.
+DNS=2001:4860:4860::8888
+DNS=2606:4700:4700::1111
+Domains=~.
 
 [Link]
 # Assign the address even on a "mesh of one" (no peers yet), rather than

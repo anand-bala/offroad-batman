@@ -64,6 +64,42 @@ and looks healthy with no peer.
 Likewise `batman-adv` will form a mesh of one that forwards nothing,
 so `batctl o` listing the other nodes is the real check.
 
+### Testing the Uplink: There Is No IPv4 on the Mesh
+
+`ping 8.8.8.8` will **never** work from a Jetson, no matter how healthy the
+uplink is.
+`bat0` is IPv6 ULA only -- there is no IPv4 address on it, so there is no
+source address to send a v4 packet from.
+The reply is `connect: Network is unreachable`,
+which reads exactly like a broken mesh and is not one.
+
+Reach for the same resolvers by their IPv6 addresses instead:
+
+```sh
+ping6 2606:4700:4700::1111  # Cloudflare, the 1.1.1.1 you meant
+ping6 2001:4860:4860::8888  # Google, the 8.8.8.8 you meant
+ping6 -I bat0 2606:4700:4700::1111 # force it over the mesh, not eth0
+```
+
+Use the `-I bat0` form when the node also has Ethernet or WiFi up.
+Without it a working reply may have gone out the other interface entirely,
+which tests nothing about the mesh.
+
+If those fail, work down the layers rather than guessing:
+
+```sh
+ip -6 route show default    # expect: default via <heylo-base's ULA> dev bat0
+batctl gwl                  # expect the router listed, with a => on the selected one
+ping6 heylo-base.mesh       # the gateway itself, over the mesh
+resolvectl query one.one.one.one # DNS, once the above pass
+```
+
+A default route with an empty `batctl gwl` means the mesh is up
+but the router is not announcing as a gateway.
+`heylo-base.mesh` answering while the resolvers do not
+puts the fault on the router's WAN side --
+firewall zone or NAT66, see [docs/OPENWRT.md](docs/OPENWRT.md).
+
 ## Fleet Configuration
 
 The one file to edit is `etc/bat-hosts`: one line per node, radio MAC to name.
@@ -121,30 +157,50 @@ ssh <node>@fe80::XXXX%<laptop-eth>
 
 This reaches *that node*, not the mesh.
 
-## Field Measurement
+## Diagnostics and Field Measurement
 
-`halow-measure.sh` measures link quality, in two modes:
+`batman_oracle.sh` is the one diagnostics tool.
+It replaces `halow-measure.sh` and the `status` subcommand of `halow-batman.sh`;
+the old IBSS/batman bring-up harnesses are gone,
+superseded by `install_network_stack.sh` and the systemd units.
 
 ```sh
-# one careful measurement at a surveyed distance
-sudo PEER= BW_MHZ=1 HEIGHT_M=4 ./halow-measure.sh at 750 "clear LOS, dry" <node >.mesh
-
-# continuous trace while the other node walks away; run on the STATIONARY node
-sudo PEER= BW_MHZ=1 HEIGHT_M=4 OUT=walk-1mhz.csv ./halow-measure.sh walk <node >.mesh
+./batman_oracle.sh status                    # whole-fleet health
+NODE=olo PEER=wazza ... ./batman_oracle.sh at 750 "clear LOS, dry"
+NODE=olo PEER=wazza ... ./batman_oracle.sh tp 750     # throughput, both directions
+NODE=olo PEER=wazza ... ./batman_oracle.sh walk       # trace until the link dies
+NODE=olo ./batman_oracle.sh soak                      # unattended logging
+./batman_oracle.sh hosts                              # roster as /etc/hosts entries
 ```
 
-`PEER` is required; `BW_MHZ` and `HEIGHT_M` are recorded verbatim,
-not measured -- record height every time,
-it dominates path loss and a row without it cannot be compared.
-Raw output lands in `rangetest-logs/`.
+**It is a remote control head, not a node.**
+Run it from a laptop on the router's Ethernet:
+every reading, including the ping, is taken *on* a node over ssh.
+A ping issued by the laptop would cross Ethernet and the router
+before touching a radio and would measure nothing useful.
+Run on a Jetson it is the same code path with the ssh hop elided.
 
-Use `at` for a number going into a range budget and `walk` for finding the cliff edge.
+`NODE` is the node to measure from, `PEER` the node to measure to,
+both roster names from `etc/bat-hosts`.
+`BW_MHZ` and `HEIGHT_M` are recorded verbatim, not measured --
+record height every time,
+it dominates path loss and a row without it cannot be compared.
+
+Use `at` for a number going into a range budget and `walk` for finding the cliff
+edge. `at` and `tp` are split on the passive/active line and write to separate
+CSVs: at 1 MHz a throughput run does not perturb the link, it saturates it.
 The number to take away from a walk is **weakest working RSSI**:
 that is the practical sensitivity floor, and the whole range budget rests on it.
 Budget 15-20 dB above it for a link you intend to rely on.
 
 Bandwidth changes need both ends reconfigured,
 so do every bandwidth at one position before moving.
+
+Clock sync is a hard prerequisite for `soak` --
+cross-node timestamps are only joinable if the clocks agree,
+and these Jetsons have no RTC.
+See [docs/MONITORING.md](docs/MONITORING.md) for that, the laptop setup,
+the output schemas, and how to read the results.
 
 ## Design Notes
 
@@ -190,6 +246,9 @@ which someone can capture handshakes unseen.
 3. `batman-adv` on top, then scale to four.
 4. Convert the travel router to IBSS and add gateway mode -- see
    [docs/OPENWRT.md](docs/OPENWRT.md).
+   Done: the router meshes, forwards `mesh` -> `wan`, and masquerades v6.
+   The Jetson half is the static `Gateway=` in `25-bat0.network`; batman
+   gateway mode does not create a route on a mesh with no DHCP.
 5. Decide bandwidth by measurement against the 750 m hop target.
 6. WireGuard over `bat0`.
 

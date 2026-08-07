@@ -9,34 +9,15 @@ cd "$SCRIPT_DIR"
 # Preamble
 # --------------------------------------------------------------------------------
 
-log() { >&2 echo "==> $*"; }
-err() { >&2 echo "ERROR: $*"; }
-
-die() {
-  err "$*"
-  exit 1
-}
-
-as_root() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
-
-# require_cmd <name> [hint] -- hint is usually the package to install.
-#
-# Also searches the sbin directories explicitly. A non-root user's PATH on
-# Debian omits them, so `command -v iw` says "missing" for a tool that is
-# installed and that the units (running as root) will resolve fine.
-require_cmd() {
-  local d
-  command -v "$1" >/dev/null && return 0
-  for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do
-    [[ -x $d/$1 ]] && return 0
-  done
-  die "$1 not found${2:+ ($2)}"
-}
-
-# require_iface <iface>
-require_iface() {
-  ip link show "$1" >/dev/null 2>&1 || die "$1 does not exist"
-}
+# Identity, addressing and /etc/hosts all come from the library, which is also
+# what batman_oracle.sh reads them through. They were duplicated here before,
+# which meant the installer and the diagnostics could disagree about a node's
+# name or address -- the one disagreement neither tool can report, because each
+# is individually self-consistent.
+# shellcheck source=halow-lib.sh
+source "$SCRIPT_DIR/halow-lib.sh"
+# shellcheck disable=SC2034  # read by log()/warn()/die() in the library
+LOG_TAG=install
 
 # preflight -- fail here, with the fix, rather than at boot on the node.
 #
@@ -52,6 +33,7 @@ preflight() {
   require_cmd batctl "apt install batctl"
   require_cmd hostnamectl "apt install systemd"
   require_cmd wpa_supplicant_s1g "run ./build_dependencies.sh"
+  require_cmd chronyc "apt install chrony"
 
   # Both modules are named in modules-load.d/halow-mesh.conf, and
   # systemd-modules-load.service fails the boot into degraded state over a name
@@ -70,165 +52,6 @@ preflight() {
   compgen -G '/usr/lib*/libnss_resolve.so.2' >/dev/null ||
     compgen -G '/usr/lib/*/libnss_resolve.so.2' >/dev/null ||
     die "libnss_resolve.so.2 not found (apt install libnss-resolve)"
-}
-
-# halow_iface -- the netdev bound to the Morse driver, whatever it is called.
-#
-# The card is USB, so before any rename the kernel hands it a MAC-derived name
-# like wlx0cbf74005bc8, different on every node. After installing
-# 10-halow.link it is halow0. Detecting by driver means the scripts work either
-# way, and on all four nodes, with no per-node configuration.
-halow_iface() {
-  local d drv
-  for d in /sys/class/net/*; do
-    [[ -e $d/device/driver ]] || continue
-    drv=$(basename "$(readlink -f "$d/device/driver")" 2>/dev/null || true)
-    case $drv in
-    morse*)
-      basename "$d"
-      return 0
-      ;;
-    esac
-  done
-  return 0
-}
-
-# halow_phy <iface> -- the wiphy that netdev belongs to.
-#
-# Not necessarily phy0. The index is handed out in registration order, so any
-# node with a second wireless device (an onboard card, a USB dongle) can push
-# the Morse card to phy1 or higher. It is not stable across module reloads
-# either: unloading and reloading morse.ko moves the card to the next free
-# index. Reading it back from the netdev is the only reliable answer.
-# Plain readlink, not readlink -f: -f canonicalises a path whose final
-# component does not exist, so a non-wireless interface would yield the
-# literal string "phy80211" rather than nothing.
-halow_phy() {
-  local iface link
-  iface="${1?missing \'iface\' argument, aborting}"
-  [[ -L /sys/class/net/$iface/phy80211 ]] || return 0
-  link=$(readlink "/sys/class/net/$iface/phy80211" 2>/dev/null || true)
-  [[ -n $link ]] && basename "$link"
-  return 0
-}
-
-# iface_mac <iface> -- the permanent (burned-in) MAC of iface.
-#
-# Prefers ethtool -P over the sysfs address: sysfs reflects whatever MAC is
-# currently assigned, but the ULA suffix derived from this must stay stable
-# across reboots, so the permanent address is the correct source when the
-# driver exposes one. Falls back to sysfs when ethtool is unavailable or the
-# driver doesn't implement the permaddr ioctl (returns all zeroes).
-iface_mac() {
-  local iface="${1?missing \'iface\' argument, aborting}"
-  local mac
-  mac=$(ethtool -P "$iface" 2>/dev/null | awk '{print $NF}') || true
-  [[ $mac =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ && $mac != 00:00:00:00:00:00 ]] ||
-    mac=$(cat "/sys/class/net/$iface/address")
-  printf '%s' "$mac"
-}
-
-# node_name <iface> [<bat_hosts_file>] -- this node's name, for hostnamectl.
-#
-# Precedence: an explicit $NODE_NAME env override, then a lookup of iface's
-# MAC in bat_hosts (if given), then whatever hostname is already set.
-node_name() {
-  local iface="${1?missing \'iface\' argument, aborting}"
-  local bat_hosts="${2:-}"
-  local mac name
-
-  if [[ -n ${NODE_NAME:-} ]]; then
-    printf '%s' "$NODE_NAME"
-    return 0
-  fi
-
-  mac=$(iface_mac "$iface")
-
-  if [[ -n $mac && -f $bat_hosts ]]; then
-    name=$(awk -v m="${mac,,}" '
-      /^[[:space:]]*(#|$)/ {next}
-      tolower($1) == m {print $2; exit}' "$bat_hosts")
-    if [[ -n $name ]]; then
-      printf '%s' "$name"
-      return 0
-    fi
-  fi
-
-  hostname 2>/dev/null || true
-}
-
-# eui64_from_mac <mac> -- the EUI-64 interface identifier for a MAC.
-#
-# Flips the MAC's universal/local bit and inserts ff:fe in the middle, per
-# RFC 4291 appendix A. This is the lower 64 bits appended to $ULA_PREFIX to
-# form a node's static address.
-#
-# Takes a MAC rather than an interface because it is used two ways: for this
-# node, whose MAC is read off its own radio, and for every peer, whose MAC is
-# known only from bat-hosts and has no local interface to read.
-eui64_from_mac() {
-  local mac="${1?missing \'mac\' argument, aborting}"
-  local a b c d e f
-  IFS=: read -r a b c d e f <<<"$mac"
-
-  printf '%02x%s:%sff:fe%s:%s%s' "$((0x$a ^ 2))" "$b" "$c" "$d" "$e" "$f"
-}
-
-# eui64_identifier <iface> -- eui64_from_mac against iface's permanent MAC.
-# The address must be stable across reboots, hence iface_mac and not sysfs.
-eui64_identifier() {
-  local iface="${1?missing \'iface\' argument, aborting}"
-  eui64_from_mac "$(iface_mac "$iface")"
-}
-
-# Markers for this script's block in /etc/hosts. Deliberately the same strings
-# halow-lib.sh used: a node set up by the old scripts already carries a block
-# under these markers, and changing the wording would leave that one orphaned
-# in place -- stale IPv4 entries, shadowing nothing, impossible to spot -- next
-# to a second block that actually works.
-HOSTS_BEGIN="# BEGIN halow-batman"
-HOSTS_END="# END halow-batman"
-
-# merge_hosts <bat_hosts> -- static mesh addresses for the whole fleet.
-#
-# Every node's address is derivable here, not just this one's: bat-hosts holds
-# every radio MAC, the ULA prefix is fleet-wide, and EUI-64 is deterministic.
-# So one table generates the whole roster with nothing to keep in sync by hand.
-#
-# The names are <name>.mesh plus the bare <name> -- NOT <name>.local. RFC 6762
-# reserves .local for mDNS, and since nsswitch reads files before resolve, a
-# static .local entry would permanently shadow mDNS for that name: a stale
-# entry would win forever and the mDNS path would never be exercised. Keeping
-# the suffixes apart means a failure says which layer broke -- .mesh failing is
-# the roster or the address derivation, .local failing is mDNS/resolved/NSS,
-# both failing is the mesh itself.
-#
-# Only the marked block is replaced, so localhost and anything else the distro
-# or the operator put in /etc/hosts survives, and reruns are idempotent.
-merge_hosts() {
-  local bat_hosts="${1?missing \'bat_hosts\' argument, aborting}"
-  local tmp mac name
-
-  [[ -f $bat_hosts && -f /etc/hosts ]] || return 0
-
-  tmp=$(mktemp)
-  sed "\|^${HOSTS_BEGIN}\$|,\|^${HOSTS_END}\$|d" /etc/hosts >"$tmp"
-  {
-    echo "$HOSTS_BEGIN"
-    while read -r mac name; do
-      # Tolerate a .lan suffix left in a node's hand-edited bat-hosts from the
-      # retired IPv4 scheme; the shipped table no longer carries one.
-      name=${name%.lan}
-      printf '%s:%s\t%s.mesh\t%s\n' \
-        "$ULA_PREFIX" "$(eui64_from_mac "$mac")" "$name" "$name"
-    done < <(grep -vE '^[[:space:]]*(#|$)' "$bat_hosts")
-    echo "$HOSTS_END"
-  } >>"$tmp"
-
-  as_root install -o root -g root -m 0644 "$tmp" /etc/hosts
-  rm -f "$tmp"
-
-  grep -cvE '^[[:space:]]*(#|$)' "$bat_hosts"
 }
 
 # --------------------------------------------------------------------------------
@@ -250,8 +73,8 @@ preflight
 #   "$(openssl rand -hex 2)"
 : "${ULA_PREFIX:=fdc7:37f3:e24a:0}"
 
-# The HaLow netdev, detected by driver (see halow_iface).
-RADIO=$(halow_iface)
+# The HaLow netdev, detected by driver (see morse_iface).
+RADIO=$(morse_iface)
 [[ -n $RADIO ]] || die "no morse* radio found"
 
 # RADIO's permanent MAC (see iface_mac), used to derive IPV6_ADDR and, via
@@ -266,12 +89,38 @@ IPV6_ADDR="${ULA_PREFIX}:$(eui64_identifier "$RADIO")/64"
 # node_name for the lookup order; override by exporting NODE_NAME.
 : "${NODE_NAME:=$(node_name "$RADIO" ./etc/bat-hosts)}"
 
+# The roster name of the node holding the uplink -- the OpenWrt travel router.
+# Its mesh address becomes every other node's default route. Override by
+# exporting GATEWAY_NAME; set it empty to install no default route at all,
+# which is the right thing on the gateway itself and on an isolated bench pair.
+: "${GATEWAY_NAME:=heylo-base}"
+
+# GATEWAY_ADDR -- the uplink's mesh address, derived rather than written down.
+#
+# Same derivation as every other node's: its radio MAC out of the roster,
+# EUI-64'd against the fleet prefix. Deriving it means a ULA_PREFIX override
+# moves the gateway with the fleet, where a literal address would silently
+# point at the old prefix and every node would lose its route out.
+#
+# Empty when this node IS the gateway (it does not route to itself), when
+# GATEWAY_NAME is cleared, or when the name is absent from the roster.
+GATEWAY_ADDR=""
+if [[ -n $GATEWAY_NAME && $GATEWAY_NAME != "$NODE_NAME" ]]; then
+  GATEWAY_ADDR=$(node_mesh_addr "$GATEWAY_NAME" ./etc/bat-hosts "$ULA_PREFIX")
+  if [[ -z $GATEWAY_ADDR ]]; then
+    # Not fatal: the mesh still works, this node just has no way out. Say so
+    # loudly rather than leaving it to be found by a failed ping in the field.
+    warn "gateway '$GATEWAY_NAME' not in etc/bat-hosts; no default route will be set"
+  fi
+fi
+
 log "Setting up B.A.T.M.A.N. networking stack as follows:
 
   Device Hostname:    ${NODE_NAME}
   HaLow Interface:    ${RADIO}
   HaLow MAC Address:  ${MAC}
   IPv6 Address:       ${IPV6_ADDR}
+  Default Route:      ${GATEWAY_ADDR:-<none> (this node is the gateway, or none is configured)}
 "
 
 # --------------------------------------------------------------------------------
@@ -290,16 +139,53 @@ as_root install -D -o root -g root -m 0600 \
   etc/wpa_supplicant/wpa_supplicant-halow0.conf \
   /etc/wpa_supplicant/wpa_supplicant-halow0.conf
 
-# Stamp this node's ULA address into the installed copy of 25-bat0.network.
-# Done to a temp copy, never in place: an in-place sed dirties the working tree
-# and bakes one node's address into the repo, which then travels to the next
-# node as its apparent default.
+# Stamp this node's ULA address and its default route into the installed copy
+# of 25-bat0.network. Done to a temp copy, never in place: an in-place sed
+# dirties the working tree and bakes one node's address into the repo, which
+# then travels to the next node as its apparent default.
+#
+# An empty GATEWAY_ADDR deletes the Gateway= line rather than writing a blank
+# one, which networkd rejects as a parse error -- taking the whole .network
+# file down with it, address included, over a route that was meant to be
+# optional.
 STAMPED=$(mktemp)
 trap 'rm -f "$STAMPED"' EXIT
 sed -E "s|^Address=.*|Address=${IPV6_ADDR}|" \
   etc/systemd/network/25-bat0.network >"$STAMPED"
+if [[ -n $GATEWAY_ADDR ]]; then
+  sed -i -E "s|^Gateway=.*|Gateway=${GATEWAY_ADDR}|" "$STAMPED"
+else
+  sed -i -E "/^Gateway=/d" "$STAMPED"
+fi
 as_root install -D -o root -g root -m 0644 \
   "$STAMPED" /etc/systemd/network/25-bat0.network
+
+# Stamp the same gateway address into the chrony drop-in, for the same reason:
+# derived, never written down, so a ULA_PREFIX override moves the time source
+# along with everything else.
+#
+# With no gateway there is no authoritative clock, so the drop-in is removed
+# rather than left pointing at a placeholder. chrony then free-runs and `soak`
+# refuses to log, which is the correct outcome -- unjoinable timestamps are
+# worse than no timestamps, and the operator is told why.
+if [[ -n $GATEWAY_ADDR ]]; then
+  CHRONY_STAMPED=$(mktemp)
+  sed -E "s|^server GATEWAY_ADDRESS_PLACEHOLDER|server ${GATEWAY_ADDR}|" \
+    etc/chrony/conf.d/halow-mesh.conf >"$CHRONY_STAMPED"
+  as_root install -D -o root -g root -m 0644 \
+    "$CHRONY_STAMPED" /etc/chrony/conf.d/halow-mesh.conf
+  rm -f "$CHRONY_STAMPED"
+  log "chrony will follow ${GATEWAY_NAME} at ${GATEWAY_ADDR}"
+else
+  as_root rm -f /etc/chrony/conf.d/halow-mesh.conf
+  warn "no gateway: this node has no time source, and 'soak' will refuse to run"
+fi
+
+# systemd-timesyncd and chrony both want to discipline the clock and will fight
+# over it. Same class of collision as avahi against systemd-resolved below, and
+# the same remedy. Masked rather than disabled so a package upgrade cannot
+# quietly re-enable it on a node in the field.
+as_root systemctl mask --now systemd-timesyncd.service 2>/dev/null || true
 
 # Hostname (drives <hostname>.local).
 # TODO: I feel like we should actually prefer the already set hostname on the device.
@@ -356,10 +242,27 @@ fix_nsswitch
 as_root systemctl mask --now avahi-daemon.service avahi-daemon.socket 2>/dev/null || true
 
 # Static <name>.mesh entries for the fleet, alongside mDNS's <name>.local.
-log "wrote $(merge_hosts ./etc/bat-hosts) node(s) into /etc/hosts as <name>.mesh"
+log "wrote $(merge_hosts ./etc/bat-hosts "$ULA_PREFIX") node(s) into /etc/hosts as <name>.mesh"
 
 # Reload and enable. halow0-ibss has no [Install]; it is pulled by the udev
 # rule and by halow0-attach's Requires=.
 as_root systemctl daemon-reload
 as_root udevadm control --reload
 as_root systemctl enable systemd-networkd systemd-resolved halow0-attach.service
+as_root systemctl enable chrony.service 2>/dev/null ||
+  as_root systemctl enable chronyd.service 2>/dev/null ||
+  warn "could not enable the chrony unit; check its name on this distro"
+
+# fake-hwclock writes the system time to disk periodically and restores it at
+# boot. The Orin Nano has no working RTC and comes up at the Unix epoch, which
+# turns chrony's first correction into a 56-year leap; this makes it come up at
+# "a few minutes ago" instead. An effectively stale-but-sane software RTC.
+#
+# Saved now so the very next boot already benefits, rather than waiting for the
+# first periodic save.
+if command -v fake-hwclock >/dev/null; then
+  as_root systemctl enable fake-hwclock.service 2>/dev/null || true
+  as_root fake-hwclock save 2>/dev/null || true
+else
+  warn "fake-hwclock not installed; this node will boot to 1970 (run ./build_dependencies.sh)"
+fi

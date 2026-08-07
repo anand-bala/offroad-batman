@@ -21,9 +21,13 @@ Converting it is what this document is about.
 Do this only after the Jetson-to-Jetson IBSS gate passes (see `README.md`).
 Until then the router is a working debug bridge and is worth leaving alone.
 
-> None of this has been run against the router yet.
-> Expect to adjust, and keep console/LAN access -- the wireless reconfiguration will
-> drop you.
+> All of this has been run against the router: the Jetsons mesh to it,
+> the `mesh` zone forwards to `wan`, and NAT66 is on.
+> The router side is done.
+> What was actually missing when the mesh first had no internet was on the
+> **Jetsons** -- no default route, because batman gateway mode does not create
+> one here. See step 5, which is the part most likely to mislead.
+> Keep console/LAN access -- the wireless reconfiguration will drop you.
 
 The router is configured through **LuCI**,
 the OpenWrt web UI that the Morse image is built on, at `http://192.168.8.1`
@@ -345,14 +349,253 @@ Shell equivalent on the router:
 batctl meshif bat0 gw_mode server
 ```
 
-batman-adv then elects the gateway and the Jetsons route out through it automatically.
-This replaces any hand-configured default routes;
-it is the reason to run batman-adv rather than static routing over IBSS.
+**Gateway mode does not install a default route here.**
+It is worth being blunt about this,
+because the usual description of batman gateway mode says it does.
+What batman actually elects a gateway *for* is **DHCP**:
+a client-mode node forwards its DHCP traffic to the elected server
+and takes its default route from the lease.
+This mesh has no DHCP at all -- addressing is static ULA,
+naming is mDNS -- so the election happens, `batctl gwl` fills in,
+and no route is ever created.
 
-The rest is ordinary LuCI work:
-put `bat0` in a firewall zone under Network > Firewall > Zones
-and allow forwarding from it to the WAN/Starlink zone,
-the same way the LAN zone is already set up.
+So gateway mode here is **a health signal, not a mechanism**.
+It is still worth setting, because `batctl gwl` on a Jetson
+is the one check that says "this node can see the uplink",
+but the route itself is static, in `Gateway=` in `25-bat0.network`,
+stamped per node by `install_network_stack.sh` (see `README.md`).
+
+## 5B. Firewall and NAT66
+
+Two separate things are needed here and only the first is obvious.
+Both are already configured on the current router;
+this section is the record of what was set, and what to check if it regresses.
+
+**Forwarding.** `bat0` needs a zone, and that zone needs to forward to `wan`.
+
+**NAT66.** The mesh is ULA (`fd..`), which is not internet-routable.
+Without masquerading, packets leave with an `fd..` source
+and no reply can ever come back.
+This is the half people miss,
+because the v4 `masq` on the WAN zone is on by default and the v6 `masq6` is not.
+
+**LuCI:** Network > Firewall > Zones.
+*Add* a zone named `mesh`, covered network `bat0`,
+input/output `accept`, forward `reject`,
+and tick **Allow forward to destination zones: wan**.
+Then edit the existing `wan` zone and tick **IPv6 Masquerading**.
+
+Shell equivalent:
+
+```sh
+uci add firewall zone
+uci set firewall.@zone[-1].name='mesh'
+uci set firewall.@zone[-1].network='bat0'
+uci set firewall.@zone[-1].input='ACCEPT'
+uci set firewall.@zone[-1].output='ACCEPT'
+uci set firewall.@zone[-1].forward='REJECT'
+
+uci add firewall forwarding
+uci set firewall.@forwarding[-1].src='mesh'
+uci set firewall.@forwarding[-1].dest='wan'
+
+# NAT66 on the wan zone, found by name rather than by index -- the index
+# differs between images and setting masq6 on the wrong zone is silent.
+WAN=$(uci show firewall | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='wan'$/\1/p")
+uci set firewall."$WAN".masq6='1'
+
+uci commit firewall
+/etc/init.d/firewall restart
+```
+
+`option forward` on the zone is intra-zone traffic (mesh node to mesh node
+*through the router*), not the way out;
+`REJECT` is correct there, since the Jetsons reach each other over batman
+directly and never transit the router.
+The way out is the separate `forwarding` section.
+
+Confirm the NAT rule actually exists rather than trusting the commit:
+
+```sh
+nft list ruleset | grep -i masquerade # expect an ip6 rule, not just ip
+fw4 print | grep -A5 'chain srcnat'
+```
+
+### The "Section Is Disabled" Message Is Expected
+
+Every `/etc/init.d/firewall restart` on this router prints:
+
+```
+Section @forwarding[0] is disabled, ignoring section
+```
+
+**This is benign and predates anything in this document.**
+`@forwarding[0]` is GL.iNet's own `lan` -> `wan` rule,
+shipped with `option enabled '0'` because the GL.iNet layer manages LAN
+forwarding itself. It is not the mesh rule.
+
+Worth writing down because the message appears immediately after the commit
+that adds the mesh rule, reads like a report on it, and sends you rechecking
+a firewall that is correct.
+The index in the message is the section `fw4` rejected,
+which is not the one you just added -- new sections land at the end.
+
+Check which section is actually meant before believing it:
+
+```sh
+uci show firewall | grep -E 'forwarding|zone.*name'
+```
+
+On the current router that gives `@forwarding[0]` as the disabled GL.iNet
+`lan` -> `wan`, `@forwarding[1]` as `ahwlan` -> `wan`,
+and `@forwarding[2]` as the `mesh` -> `wan` rule from this section,
+with no `enabled` option, which means on.
+Zones are `@zone[0]` lan, `@zone[1]` wan, `@zone[3]` mesh.
+
+If a message ever does name the mesh rule, the causes in order are:
+a `src`/`dest` that matches no zone's `option name`,
+an explicit `option enabled '0'`,
+or a half-built section from an interrupted `uci add`
+(delete it with `uci delete firewall.@forwarding[N]` and redo).
+
+## 5C. Serving Time to the Mesh
+
+The Jetsons have no working RTC and boot to the Unix epoch.
+Measurements taken on different nodes are only joinable
+if their timestamps mean the same thing,
+so `install_network_stack.sh` configures every Jetson as a chrony client
+of **this router**, and `batman_oracle.sh soak` refuses to log until
+chrony reports the clock is synced.
+That makes the router the fleet's clock authority.
+See [MONITORING.md](MONITORING.md) for the whole picture.
+
+**The router does not need chrony.**
+NTP is a wire protocol and the clients do not care what serves it.
+OpenWrt already ships busybox `sysntpd`, which only needs to be told to serve:
+
+**LuCI:** System > System > Time Synchronization,
+tick **Provide NTP server**.
+
+```sh
+uci set system.ntp.enable_server='1'
+uci commit system
+/etc/init.d/sysntpd restart
+```
+
+No firewall rule is needed *provided* you built the `mesh` zone as in 5B --
+its `input` is `ACCEPT`, which already admits UDP/123.
+If you tightened that, add an explicit rule for port 123 from `mesh`.
+
+`fake-hwclock` has no OpenWrt equivalent to install:
+`/etc/init.d/sysfixtime` is already there
+and restores the clock at boot from the newest file mtime on the filesystem.
+
+### The Offline Case
+
+**busybox `sysntpd` will not serve time it does not have.**
+The GL-MT3000 has no RTC either,
+so with the uplink down at boot it comes up at the image's build date
+and simply refuses to be a time source until Starlink is up.
+Every Jetson then free-runs and `soak` will not start.
+
+If the mesh has to work with no uplink, that is not good enough,
+and the router needs real chrony:
+
+```sh
+opkg install chrony
+```
+
+```conf
+# /etc/chrony/chrony.conf additions
+local stratum 10          # serve time even with no upstream of our own
+allow fdc7:37f3:e24a::/48 # the fleet, and nothing else
+```
+
+`local stratum 10` is the whole point:
+it declares this box authoritative on its own say-so.
+That is a lie, but a *consistent* one --
+every node agrees on the same wrong time,
+which is all that cross-node joining actually requires.
+Without it there is no ground truth anywhere and the nodes agree on nothing.
+
+Confirm the package feeds are configured before relying on this;
+the Morse packages come from the kit image rather than the OpenWrt feeds
+(see step 2), and `chrony` comes from the feeds.
+
+### Verify
+
+From a Jetson, after the router is serving:
+
+```sh
+chronyc sources -v # '^*' marks the selected server; expect the router
+chronyc tracking   # 'Last offset' and 'RMS offset' should be small
+```
+
+Over HaLow expect **low single-digit milliseconds**.
+That is ample for correlating latency and throughput logs
+and nowhere near enough for anything tighter.
+
+## 5D. Getting a Laptop onto the Mesh
+
+`batman_oracle.sh` is normally run from a laptop
+plugged into this router's Ethernet.
+The laptop has no HaLow radio, so it drives the nodes over ssh --
+which means it needs to reach the mesh's ULA addresses.
+
+**Route, do not bridge.**
+LuCI will happily let you add `bat0` to `br-lan`,
+and it looks like the shortest path to the answer.
+Do not.
+`br-lan` carries the router's own 2.4 and 5 GHz APs,
+and bridging pushes every LAN broadcast and multicast frame
+into a 1 MHz channel with a few hundred kbit/s of total capacity.
+One chatty laptop can saturate the mesh it is supposed to be measuring.
+
+Give the LAN its own `/64` out of the same `/48` instead:
+
+```sh
+uci set network.lan.ip6addr='fdc7:37f3:e24a:1::1/64'
+uci set network.lan.ip6assign='64'
+uci commit network
+/etc/init.d/network restart
+```
+
+Then allow the LAN to reach the mesh:
+
+```sh
+uci add firewall forwarding
+uci set firewall.@forwarding[-1].src='lan'
+uci set firewall.@forwarding[-1].dest='mesh'
+uci commit firewall
+/etc/init.d/firewall restart
+```
+
+**The return path needs no per-node configuration**,
+which is the reason to do it this way.
+Every Jetson already carries a static default route to this router
+(`Gateway=` in `25-bat0.network`, stamped by `install_network_stack.sh`),
+so replies to `fdc7:37f3:e24a:1::/64` follow it back here without being told to.
+Note the mesh is `...:0::/64` and the LAN is `...:1::/64` --
+distinct `/64`s under one `/48`, so nothing overlaps.
+
+On the laptop, take the fleet's names from the roster
+rather than copying anyone's `/etc/hosts`:
+
+```sh
+./batman_oracle.sh hosts | sudo tee -a /etc/hosts
+ssh-copy-id <user>@olo.mesh   # once per node; the oracle needs BatchMode ssh
+```
+
+Then check the whole fleet from the laptop:
+
+```sh
+./batman_oracle.sh status
+```
+
+Everything the oracle reports is measured **on** a node, not on the laptop.
+A ping issued from the laptop would cross Ethernet and this router
+before touching a radio,
+and would say nothing about the hop under test.
 
 ## 6. Verify
 
@@ -380,6 +623,31 @@ which is the whole point of the exercise.
 
 Leave the router associated and idle for a while before believing any of it.
 Association is the easy part, and the failure mode in section 0 shows up minutes later.
+
+### End to End, from a Jetson
+
+The above only proves the router's view. The actual goal is a Jetson reaching
+the internet, and that is tested from the Jetson, not here:
+
+```sh
+ping6 -I bat0 2606:4700:4700::1111 # Cloudflare; there is no IPv4 on the mesh
+```
+
+`ping 8.8.8.8` fails on a perfectly healthy setup -- `bat0` is IPv6-only,
+so there is no v4 source address to send from. See `README.md`.
+
+Where it breaks tells you which half is wrong:
+
+| Symptom on a Jetson | Where the fault is |
+| --- | --- |
+| no `default via .. dev bat0` | Jetson: rerun `install_network_stack.sh` |
+| `batctl gwl` empty | router: `gw_mode server` not set, or mesh not formed |
+| `heylo-base.mesh` pings, resolvers do not | router: this section -- forwarding or `masq6` |
+| resolvers ping, names do not resolve | DNS, not routing: `resolvectl status bat0` |
+
+The third row is the one worth recognising:
+mesh perfect, uplink perfect, and nothing works,
+because ULA packets left the router unmasqueraded and no reply could return.
 
 ## 7. Persistence
 

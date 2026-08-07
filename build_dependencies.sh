@@ -260,6 +260,26 @@ APT_DEPS=(
   wireless-tools
   iw
   libnss-resolve
+
+  # Diagnostics (batman_oracle.sh) and the clock discipline it depends on.
+  #
+  # chrony + fake-hwclock: the Jetsons have no working RTC and boot to 1970.
+  # Measurements from different nodes are only joinable if their timestamps
+  # mean the same thing, so `soak` refuses to log until chrony says the clock
+  # is synced. fake-hwclock restores the last known time at boot, which turns
+  # chrony's first correction from a 56-year leap into something small enough
+  # to be safe. See docs/MONITORING.md.
+  #
+  # No gawk: the parsers in halow-lib.sh deliberately avoid regex interval
+  # expressions so that Ubuntu's mawk is enough. Needing gawk would be a silent
+  # failure on a node that lacks it -- an empty column rather than an error.
+  #
+  # ethtool was already required by install_network_stack.sh's preflight (it
+  # reads the radio's permanent MAC) without ever being installed here.
+  chrony
+  fake-hwclock
+  iperf3
+  ethtool
 )
 
 missing=()
