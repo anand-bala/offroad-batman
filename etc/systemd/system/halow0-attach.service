@@ -3,6 +3,18 @@ Description=Attach halow0 to the batman-adv mesh (bat0)
 # The radio must be in IBSS and joined before it is worth attaching.
 Requires=halow0-ibss.service
 After=halow0-ibss.service
+# PartOf upgrades what Requires= propagates. Requires= alone forwards an
+# explicit STOP but not a restart, so `systemctl restart halow0-ibss` stopped
+# this unit (running its ExecStop, i.e. nomaster) and left it stopped: nothing
+# pulls a already-satisfied WantedBy= again. Restarting the supplicant
+# therefore silently detached the radio from bat0 until someone noticed and
+# restarted this unit too. With PartOf, an ibss restart restarts this as well.
+PartOf=halow0-ibss.service
+
+# Same reasoning as in halow0-ibss: with Restart= below, the default start
+# limit would latch the unit into a state needing `systemctl reset-failed` on a
+# node nobody can reach.
+StartLimitIntervalSec=0
 # bat0 is created by networkd from 25-bat0.netdev. Ordering against the service
 # is not enough: networkd being "started" says nothing about the netdev having
 # been created yet, and this is a Type=oneshot with no Restart=, so a single
@@ -18,11 +30,29 @@ After=sys-subsystem-net-devices-halow0.device
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+
+# Ordering After=halow0-ibss.service is not the same as waiting for the join.
+# That unit is Type=simple, so it counts as started the instant
+# wpa_supplicant_s1g forks -- before it has taken the interface down, set type
+# IBSS and joined the cell. Enslaving inside that window hands batman-adv a
+# radio the supplicant is still reconfiguring (the type change needs the link
+# down), and the result is a slave of bat0 that never carries anything. Wait
+# for the cell instead; a cell of one is fine, peers are not the gate here.
+ExecStartPre=/usr/local/lib/halow/halow-wait joined halow0
+
 # Enslave the radio to the mesh. batman-adv starts using it immediately; if it
 # has no peers yet, bat0 is simply a mesh of one until a neighbour appears.
 ExecStart=/sbin/ip link set halow0 master bat0
 # On teardown, detach cleanly (leaves the radio in IBSS for direct testing).
 ExecStop=-/sbin/ip link set halow0 nomaster
+
+# A oneshot that loses a race used to stay lost until the next reboot -- the
+# exact failure the Requires= comments above are written against, left
+# unhandled for the unit's own ExecStart. Retry instead. Restart=on-failure is
+# permitted for Type=oneshot (only always/on-success are not), and with
+# RemainAfterExit=yes a success still latches as active.
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

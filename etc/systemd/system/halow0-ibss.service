@@ -7,6 +7,14 @@ After=sys-subsystem-net-devices-halow0.device
 # rfkill state is restored late in boot -- clear it after that has happened.
 After=systemd-rfkill.service
 
+# No start rate limit. The default (5 starts in 10s) exists to stop a broken
+# unit spinning, but the failure it produces here is worse than the spin: the
+# unit latches into a state that a plain `systemctl start` refuses, needing
+# `systemctl reset-failed` from someone with a shell on the node. On a radio
+# that may legitimately need several attempts while the driver settles, that
+# turns a transient into a trip out to the field.
+StartLimitIntervalSec=0
+
 [Service]
 Type=simple
 
@@ -31,7 +39,15 @@ RuntimeDirectoryMode=0750
 ExecStartPre=rfkill unblock wlan
 
 # Regulatory domain, then the mode preset.
+#
+# The set is asynchronous -- it returns once the request is queued, and the
+# kernel applies it out of band. Without the wait, wpa_supplicant can
+# enumerate channels while the domain is still world-roaming ("00"), find the
+# S1G channel disallowed, and then sit there running without ever joining: a
+# green unit, no mesh, and Restart=on-failure never fires because nothing
+# failed. Gate on the domain actually landing instead.
 ExecStartPre=iw reg set US
+ExecStartPre=/usr/local/lib/halow/halow-wait regdom US
 ExecStartPre=ip link set halow0 down
 # Still best-effort: the supplicant sets the type authoritatively via mode=1,
 # so a driver that rejects the preset can still reach a working IBSS.

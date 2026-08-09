@@ -64,6 +64,24 @@ and looks healthy with no peer.
 Likewise `batman-adv` will form a mesh of one that forwards nothing,
 so `batctl o` listing the other nodes is the real check.
 
+If the mesh is down, restarting the supplicant is the whole recovery:
+
+```sh
+sudo systemctl restart halow0-ibss.service   # pulls halow0-attach with it
+```
+
+Before doing that, capture the boot state -- a restart destroys the evidence:
+
+```sh
+systemctl status halow0-ibss halow0-attach
+journalctl -b -u halow0-ibss -u halow0-attach --no-pager
+iw reg get; rfkill list      # domain "00", or a soft block
+ip -d link show halow0       # master bat0? type ibss?
+```
+
+Needing to restart `halow0-attach` *separately* now means something is wrong
+beyond the boot races described under Design Notes.
+
 ### Testing the Uplink: There Is No IPv4 on the Mesh
 
 `ping 8.8.8.8` will **never** work from a Jetson, no matter how healthy the
@@ -227,6 +245,38 @@ which reads as a broken driver rather than as too much signal.
 Target -40 to -60 dBm -- different rooms,
 or 30 dB inline attenuators -- and treat any RSSI taken at short range as meaningless
 for range planning.
+
+**Boot ordering is gated, not merely ordered.**
+Nodes came up after a field reboot with both units green and no mesh,
+fixed only by restarting them by hand.
+Ordering alone could not prevent that, because the signals systemd had were lies.
+`iw reg set` returns once the request is queued,
+so the supplicant could enumerate channels while the domain was still world-roaming
+and find the S1G channel disallowed --
+it does not exit over that, it just never joins,
+so `Restart=on-failure` never fires.
+And `halow0-ibss` is `Type=simple`,
+so it counted as started the instant `wpa_supplicant_s1g` forked,
+long before it had taken the link down, set type IBSS and joined;
+`halow0-attach` enslaved to `bat0` inside that window
+and got a slave that never carried anything.
+Both units now gate on the real condition via
+`usr/local/lib/halow/halow-wait` (`regdom`, `joined`),
+which fails on timeout rather than falling through --
+with `StartLimitIntervalSec=0` on both,
+that is a visible retry loop in the journal, not a unit latched into
+a state needing `systemctl reset-failed` on a node nobody can reach.
+`halow0-attach` also gained `Restart=on-failure`,
+since a `Type=oneshot` that lost a race stayed lost until the next reboot.
+
+**`halow0-attach` is `PartOf=halow0-ibss`.**
+`Requires=` forwards an explicit stop but *not* a restart,
+so restarting the supplicant used to run attach's `ExecStop` (`nomaster`)
+and leave it stopped --
+an already-satisfied `WantedBy=` is not pulled again.
+Restarting `halow0-ibss` therefore detached the radio from `bat0` silently.
+This also means "I had to restart both" says nothing about a root cause:
+it was forced by the wiring, whatever the underlying fault.
 
 **Security.**
 RSN-IBSS is weaker than WPA3/SAE: offline-attackable handshake, no forward secrecy,

@@ -134,6 +134,13 @@ while IFS= read -r f; do
   as_root install -D -o root -g root -m 0644 "$f" "/$f"
 done < <(find etc -type f ! -name 'wpa_supplicant-halow0.conf')
 
+# Readiness gates called from both units' ExecStartPre=. Outside etc/, so it is
+# not covered by the sweep above, and 0755 rather than 0644 because systemd
+# execs it directly.
+as_root install -D -o root -g root -m 0755 \
+  usr/local/lib/halow/halow-wait \
+  /usr/local/lib/halow/halow-wait
+
 # Supplicant conf may hold a PSK -> 0600.
 as_root install -D -o root -g root -m 0600 \
   etc/wpa_supplicant/wpa_supplicant-halow0.conf \

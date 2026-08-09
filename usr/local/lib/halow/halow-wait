@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#
+# halow-wait -- boot-time readiness gates for the HaLow mesh units.
+#
+# Standalone on purpose: this runs from ExecStartPre= on a node, where
+# halow-lib.sh is not installed. Do not add a source line.
+#
+# Both subcommands exist because the signal systemd has available is a lie:
+#
+#   regdom   `iw reg set` returns as soon as the request is queued; the kernel
+#            applies it out of band. The supplicant, started milliseconds
+#            later, can enumerate channels before the domain lands and find
+#            S1G channel 33 disallowed. It does not exit over that -- it just
+#            never joins, which is a green unit and a radio off the mesh until
+#            someone restarts it by hand.
+#
+#   joined   Type=simple means halow0-ibss counts as "started" the moment
+#            wpa_supplicant forks, long before it has taken the interface
+#            down, set type IBSS and joined the cell. Enslaving to bat0 inside
+#            that window is how the radio ends up attached but dead.
+#
+# Timeouts FAIL rather than falling through. Both callers pair this with
+# Restart=on-failure and StartLimitIntervalSec=0, so a failure here is a
+# visible retry loop in the journal rather than a wedged node -- which is the
+# same reasoning that removed the '-' prefixes from halow0-ibss: an
+# out-of-spec radio that appears to come up is the worst outcome.
+set -euo pipefail
+
+LOG_TAG=halow-wait
+log() { printf '[%s] %s\n' "$LOG_TAG" "$*" >&2; }
+die() {
+  printf '[%s] ERROR: %s\n' "$LOG_TAG" "$*" >&2
+  exit 1
+}
+
+# Poll rather than block on an event: there is no netlink-free way to wait on
+# either condition from a shell, and both resolve in well under a second on a
+# healthy node. The generous ceilings are for the cold-boot case, where the
+# radio, the regulatory db and the supplicant are all coming up at once.
+REGDOM_TIMEOUT=${REGDOM_TIMEOUT:-15}
+JOIN_TIMEOUT=${JOIN_TIMEOUT:-30}
+POLL_INTERVAL=0.25
+
+# wait_regdom <CC>
+#
+# Succeeds once the kernel actually reports the requested country. `iw reg get`
+# prints one "country XX:" line per phy plus the global one; any of them
+# reporting the target is enough, since a single-radio node has nothing else to
+# confuse it and a mismatched phy would be a different bug entirely.
+wait_regdom() {
+  local want=$1 deadline
+  deadline=$(($(date +%s) + REGDOM_TIMEOUT))
+
+  while :; do
+    if iw reg get 2>/dev/null | grep -qE "^country ${want}:"; then
+      return 0
+    fi
+    [[ $(date +%s) -lt $deadline ]] || break
+    sleep "$POLL_INTERVAL"
+  done
+
+  # Worth printing the current state: "00" means the request never landed,
+  # whereas some other country means something else on the node is fighting
+  # for the domain, and those want different fixes.
+  log "regulatory domain still: $(iw reg get 2>/dev/null | grep -m1 '^country' || echo unknown)"
+  die "regulatory domain did not reach ${want} within ${REGDOM_TIMEOUT}s"
+}
+
+# wait_joined <iface>
+#
+# Succeeds once the radio is in an IBSS cell. A cell of one counts -- peers are
+# not the gate here, only the supplicant having finished with the interface.
+# (This is the opposite of what the oracle wants out of `iw dev link`, where a
+# cell of one is precisely the case that must not read as healthy.)
+#
+# Two signals, either sufficient. wpa_cli is the authoritative one but depends
+# on the control socket being up; the iw check covers the window before that
+# and any Morse fork quirk in the status output. Matching negatively on "Not
+# connected" rather than positively on "Joined IBSS" keeps this working across
+# iw versions, which do not agree on the joined-state wording.
+wait_joined() {
+  local iface=$1 deadline out
+  deadline=$(($(date +%s) + JOIN_TIMEOUT))
+
+  while :; do
+    if out=$(wpa_cli -p /run/wpa_supplicant_s1g -i "$iface" status 2>/dev/null) &&
+      grep -q '^wpa_state=COMPLETED' <<<"$out"; then
+      return 0
+    fi
+    if out=$(iw dev "$iface" link 2>/dev/null) && [[ -n $out ]] &&
+      ! grep -q 'Not connected' <<<"$out"; then
+      return 0
+    fi
+    [[ $(date +%s) -lt $deadline ]] || break
+    sleep "$POLL_INTERVAL"
+  done
+
+  die "${iface} did not join the IBSS within ${JOIN_TIMEOUT}s"
+}
+
+case ${1:-} in
+regdom)
+  [[ $# -eq 2 ]] || die "usage: halow-wait regdom <CC>"
+  wait_regdom "$2"
+  ;;
+joined)
+  [[ $# -eq 2 ]] || die "usage: halow-wait joined <iface>"
+  wait_joined "$2"
+  ;;
+*)
+  die "usage: halow-wait regdom <CC> | joined <iface>"
+  ;;
+esac
