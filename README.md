@@ -157,6 +157,11 @@ That keeps Ethernet contributing a DNS scope of its own,
 so a bench uplink answers lookups whatever else is configured.
 `journalctl -t dns-mesh-coexist` shows the hook firing.
 
+The same rule holds at the default route.
+The mesh's gateways are stamped as `[Route]` blocks with `Metric=4096`,
+so a bench uplink's DHCP route (metric ~100) outranks the mesh
+and the mesh route carries traffic only when it is the last default standing.
+
 `NODE_NAME`, `ULA_PREFIX`, `GATEWAY_NAME`, `MESH_V4_SUBNET`,
 `MESH_V4_BASE` and `MESH_V4_GATEWAY` can all be exported to override the derived values.
 Setting `GATEWAY_NAME` empty installs no default route at all,
