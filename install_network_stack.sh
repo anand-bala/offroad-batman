@@ -214,14 +214,28 @@ stamp_or_drop() {
   fi
 }
 
+# A gateway now lives in its own three-line [Route] block, so it can carry the
+# explicit Metric that keeps a bench uplink's route ahead of the mesh's (see
+# the comment in 25-bat0.network). stamp_or_drop handles one line; an absent
+# gateway must take the whole block out, because an orphan [Route] holding
+# only a Metric is exactly the kind of half-formed section networkd rejects.
+stamp_or_drop_route() {
+  local placeholder="${1:?}" value="${2-}"
+  if [[ -n $value ]]; then
+    sed -i -E "s|^Gateway=${placeholder}\$|Gateway=${value}|" "$STAMPED"
+  else
+    sed -i -E "/^\[Route\]\$/{N;N;/Gateway=${placeholder}/d}" "$STAMPED"
+  fi
+}
+
 STAMPED=$(mktemp)
 trap 'rm -f "$STAMPED"' EXIT
 cp etc/systemd/network/25-bat0.network "$STAMPED"
 
 stamp_or_drop Address IPV6_ADDRESS_PLACEHOLDER "$IPV6_ADDR"
 stamp_or_drop Address IPV4_ADDRESS_PLACEHOLDER "$IPV4_ADDR"
-stamp_or_drop Gateway IPV6_GATEWAY_PLACEHOLDER "$GATEWAY_ADDR"
-stamp_or_drop Gateway IPV4_GATEWAY_PLACEHOLDER "$GATEWAY4_ADDR"
+stamp_or_drop_route IPV6_GATEWAY_PLACEHOLDER "$GATEWAY_ADDR"
+stamp_or_drop_route IPV4_GATEWAY_PLACEHOLDER "$GATEWAY4_ADDR"
 # The resolver is the router's dnsmasq, which is the v4 gateway. No gateway
 # means no resolver to name; .local over mDNS and .mesh out of /etc/hosts carry
 # node-to-node naming without it.
@@ -237,14 +251,24 @@ fi
 as_root install -D -o root -g root -m 0644 \
   "$STAMPED" /etc/systemd/network/25-bat0.network
 
+# Apply the stamped file now rather than at the next reboot: a rerun of this
+# installer on a live node must fix its routes live, or a bad route sits until
+# someone remembers to reboot. reconfigure is not a link bounce -- addresses
+# and routes are reapplied in place, so an install run over SSH survives it.
+# Tolerated failures: the very first install has no bat0 netdev yet, and the
+# route lands at boot as normal.
+as_root networkctl reload 2>/dev/null || true
+as_root networkctl reconfigure bat0 2>/dev/null || true
+
 # DNS coexistence with a bench uplink.
 #
-# 25-bat0.network claims Domains=~. -- the catch-all routing domain -- so that
-# in the field every lookup goes to the mesh resolvers rather than to whatever
-# a long-gone bench network last advertised. resolved gives a ~. link absolute
-# priority, which has a sharp edge on the bench: with the mesh down, lookups
-# still go only to bat0's (unreachable) resolvers, and the node reads as "no
-# internet" while a healthy Ethernet uplink sits right beside it.
+# 25-bat0.network claimed Domains=~. -- the catch-all routing domain -- when
+# its resolvers were unreachable v6 literals, and with the mesh down every
+# lookup went there to die while a healthy Ethernet uplink sat right beside
+# the node. bat0 carries a plain per-link resolver now, no monopoly, but the
+# Ethernet stamps below stay: they are what lets a bench uplink answer for
+# every name whichever links are up, and they cost nothing when the mesh
+# answers instead.
 #
 # The remedy is to stamp ~. onto the NetworkManager Ethernet profiles too.
 # With more than one ~. link, resolved queries them all and the first good

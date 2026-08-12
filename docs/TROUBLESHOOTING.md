@@ -134,6 +134,27 @@ resolvectl query one.one.one.one
 | router pings, internet does not | router: `ahwlan` -> `wan` forwarding, or `masq` |
 | names fail, addresses work | see [names do not resolve](#names-do-not-resolve) |
 
+### On the Bench: Names Resolve, Every Connection Fails `No route to host`
+
+The mesh is down, Ethernet is up and healthy, and DNS answers --
+the bench resolver is on-link, so lookups never touch the default route.
+Every actual connection then dies with `No route to host`.
+It is the inverse of a DNS fault, and it reads like one until the routes are compared:
+
+```sh
+ip -4 route show default
+# default via 192.168.1.1 dev enx... proto dhcp metric 105     <- bench uplink, must win
+# default via 192.168.12.1 dev bat0 proto static metric 4096   <- mesh, must be 4096
+```
+
+This was real: the v4 mesh gateway was once stamped as a plain `Gateway=` line,
+which takes the kernel default metric 0 and outranks every DHCP route a bench can offer.
+All IPv4 went into a peerless mesh while DNS kept answering.
+The gateways are stamped as `[Route]` blocks with `Metric=4096` since,
+so the mesh route carries traffic only when no other default remains.
+A `bat0` default with metric 0 means an old install:
+rerun `install_network_stack.sh`.
+
 ### `ping6` To a Public Resolver Fails on a Healthy Mesh
 
 There is no IPv6 uplink.

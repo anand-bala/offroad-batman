@@ -41,18 +41,6 @@ LinkLocalAddressing=ipv6
 MulticastDNS=yes
 DHCP=no
 
-# The uplink, in both families. Stamped from the roster entry named by
-# $GATEWAY_NAME so they track a ULA_PREFIX override instead of drifting from it.
-# IPv6AcceptRA=no and DHCP=no above mean nothing else will ever install a
-# default route on this link -- without these lines the mesh has no way out,
-# which is exactly the "Network is unreachable" that sent us looking.
-#
-# Neither is conditional on the router being up: a default route pointing at an
-# absent gateway costs nothing, and batman reconverges on its own when it
-# returns. Node-to-node traffic never consults them.
-Gateway=IPV6_GATEWAY_PLACEHOLDER
-Gateway=IPV4_GATEWAY_PLACEHOLDER
-
 # The resolver is the router's dnsmasq, over IPv4, for the same reason the
 # addressing above is dual stack: it is the one that can actually answer. The
 # v6 public resolvers this file used to name are unreachable across a v4-only
@@ -77,6 +65,33 @@ DNSDefaultRoute=yes
 # mesh down every lookup would go to an unreachable router to die rather than to
 # a healthy bench uplink sitting right beside it. See the DNS coexistence notes
 # in install_network_stack.sh for the history.
+
+# The uplink, in both families. Stamped from the roster entry named by
+# $GATEWAY_NAME so they track a ULA_PREFIX override instead of drifting from it.
+# IPv6AcceptRA=no and DHCP=no above mean nothing else will ever install a
+# default route on this link -- without these routes the mesh has no way out,
+# which is exactly the "Network is unreachable" that sent us looking.
+#
+# Neither is conditional on the router being up: a default route pointing at an
+# absent gateway costs nothing, and batman reconverges on its own when it
+# returns. Node-to-node traffic never consults them.
+#
+# [Route] blocks with an explicit Metric, not Gateway= lines in [Network]: a
+# plain v4 gateway line takes the kernel default metric 0, which outranks
+# every DHCP route a bench uplink can offer. With the mesh down, that sent all
+# IPv4 into bat0 to die -- DNS still answering (the resolver is on-link) while
+# every connection failed with "No route to host". The v6 twin only dodged
+# this because v6 static routes default to metric 1024. 4096 loses to any
+# real uplink and is the only default left when there is none, which is the
+# same coexistence rule the DNS stamps follow: the mesh carries the traffic
+# when it is the only path that can.
+[Route]
+Gateway=IPV6_GATEWAY_PLACEHOLDER
+Metric=4096
+
+[Route]
+Gateway=IPV4_GATEWAY_PLACEHOLDER
+Metric=4096
 
 [Link]
 # Assign the addresses even on a "mesh of one" (no peers yet), rather than
