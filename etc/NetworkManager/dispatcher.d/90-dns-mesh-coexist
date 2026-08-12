@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Stamp the ~. DNS routing domain onto Ethernet profiles as they come up.
+#
+# 25-bat0.network claims Domains=~. so field lookups go to the mesh resolvers;
+# install_network_stack.sh counter-stamps ~. onto the Ethernet profiles so a
+# bench uplink can still answer while the mesh is down. But the installer can
+# only stamp profiles that exist when it runs: swap in a new USB dongle and
+# NetworkManager mints a fresh "Wired connection N" with no stamp, and the
+# node is back to "no internet" on a healthy cable -- which is exactly how
+# this file got written. This hook closes that gap by stamping at the moment
+# a profile activates, whenever it was created.
+#
+# con mod is persistent (one stamp per profile, ever); reapply pushes it into
+# the live device without a link flap and does not re-fire the dispatcher, so
+# there is no loop. A family whose method rejects dns-search (ignore/disabled
+# -- the lidar links) refuses the mod, and the refusal is the skip: that
+# family carries no DNS to coexist with.
+
+IFACE="$1" ACTION="$2"
+
+[[ "$ACTION" == up ]] || exit 0
+[[ -n "$CONNECTION_UUID" ]] || exit 0
+[[ "$(nmcli -g GENERAL.TYPE device show "$IFACE" 2>/dev/null)" == ethernet ]] || exit 0
+
+stamped=""
+for fam in ipv4 ipv6; do
+  current=$(nmcli -g "$fam.dns-search" con show "$CONNECTION_UUID" 2>/dev/null)
+  [[ "$current" == *"~."* ]] && continue
+  nmcli con mod "$CONNECTION_UUID" +"$fam.dns-search" '~.' 2>/dev/null && stamped=1
+done
+
+if [[ -n "$stamped" ]]; then
+  nmcli device reapply "$IFACE" >/dev/null 2>&1
+  logger -t dns-mesh-coexist "stamped ~. onto '$CONNECTION_ID' ($IFACE)"
+fi
+exit 0
