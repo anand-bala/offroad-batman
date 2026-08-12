@@ -1,44 +1,33 @@
 # Travel Router (OpenWrt) as Mesh Gateway
 
-The router is from the **Morse Micro MM8108-EKH19 evaluation kit**: a GL.iNet GL-MT3000,
+The router is from the Morse Micro MM8108-EKH19 evaluation kit: a GL.iNet GL-MT3000,
 an MM8108 USB 2.0 adapter, an SMA HaLow antenna, and Morse's OpenWrt image
 (23.05.5, Morse-2.9.3).
 The adapter is USB and hot-pluggable.
 
-The whole fleet is MM8108 -- Jetsons over a Gateworks M.2 module,
-the router over this kit's USB adapter.
+The whole fleet is MM8108,
+the Jetsons over a Gateworks M.2 module and the router over this kit's USB adapter.
 Same silicon, different host interface,
 so the radio parameters here are the Jetsons' parameters verbatim.
 
-It does three jobs:
-
-1. **Gateway.**
-   It holds the uplink, and every Jetson routes out through it.
-2. **Bridge onto the LAN.**
-   The mesh and the router's own WiFi are one layer 2 domain,
-   so a laptop on the AP can reach a Jetson directly.
-3. **Clock.**
-   The Jetsons have no RTC and take their time from here.
-
-> **This document describes a router that is built and working**,
-> not a conversion to perform.
-> It was a conversion guide once, written before the hardware existed,
-> and much of what it predicted turned out wrong -- see
-> [What Changed, and Why](#what-changed-and-why) for the corrections, which are the most
-> useful part of it if you are holding an older copy.
+It does three jobs.
+It holds the uplink, and every Jetson routes out through it.
+It bridges the mesh onto its own LAN, so a laptop on the AP can reach a Jetson directly.
+And it serves time: the Jetsons have no RTC and take their clock from here.
 
 Everything below is shell.
-LuCI can express most of it and the earlier version of this document led with LuCI,
-but the router is worked on over SSH in practice,
-and the LuCI paths went stale faster than the commands did.
+LuCI can express most of it, but the router is worked on over SSH in practice,
+and the LuCI paths go stale faster than the commands do.
 
 ```sh
 ssh root@192.168.12.1
 ```
 
+For symptoms rather than structure, see
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
 ## The Map
 
-This is the whole of it.
 Read this section and the rest is detail.
 
 ```text
@@ -70,12 +59,12 @@ Read this section and the rest is detail.
 | --- | --- |
 | HaLow netdev | `wlan0` (phy#0, the `morse` driver) |
 | HaLow MAC | `0c:bf:74:00:37:57` |
-| mesh device | `bat0`, a **bridge port** of `br-ahwlan` |
+| mesh device | `bat0`, a bridge port of `br-ahwlan` |
 | LAN / mesh v4 | `192.168.12.0/24`, router at `.1` |
 | DHCP pool | `.100`-`.249` (laptops) |
 | Jetson v4 | `.11` upward, static, from roster position |
-| mesh v6 ULA | `fdc7:37f3:e24a::/64`, router at `...:0ebf:74ff:fe00:3757` |
-| uplink | `eth0`, DHCP, **IPv4 only** in practice |
+| mesh v6 ULA | `fdc7:37f3:e24a::/64`, router at `...:0ebf:74ff:fe00:3757` on `br-ahwlan` |
+| uplink | `eth0`, DHCP, IPv4 only in practice |
 | batman | 2023.1-openwrt-7, `BATMAN_IV`, `gw_mode server` |
 | hard interface MTU | 1532 |
 
@@ -89,10 +78,10 @@ UCI's radio index and the phy index do not line up, and the netdev names make it
 | `radio1` | phy#2 | `phy2-ap0` | 5 GHz |
 | `radio2` | phy#0 | `wlan0` | S1G / HaLow |
 
-So the HaLow radio is `radio2` in UCI but **phy#0**,
+The HaLow radio is `radio2` in UCI but phy#0,
 and its netdev is plain `wlan0` with no phy prefix.
 Do not infer any of these from the others.
-The authoritative check is the driver:
+Go by the driver:
 
 ```sh
 ls -l /sys/class/ieee80211/*/device/driver # only the MM8108 points at morse
@@ -101,24 +90,21 @@ morse_cli -i wlan0 version                 # succeeds only against the Morse dri
 
 ### `network.lan` Is Dead, Ignore It
 
-`uci show network` still lists a `lan` interface at `192.168.8.1` with `ip6assign='60'`.
-It has **no device**, there is no `br-lan`, and nothing is on it.
+`uci show network` lists a `lan` interface at `192.168.8.1` with `ip6assign='60'`.
+It has no device, there is no `br-lan`, and nothing is on it.
 It is GL.iNet's default, left over.
 The LAN that exists is `ahwlan`.
 
-Likewise `firewall.@forwarding[0]` is GL.iNet's `lan` -> `wan` rule,
+`firewall.@forwarding[0]` is likewise GL.iNet's `lan` -> `wan` rule,
 shipped with `enabled '0'`.
-Both are inert.
 Reading either as live sends you looking for a network that is not there.
 
-## Addressing: Why There Is IPv4
+## Addressing
 
-The mesh was designed IPv6-ULA-only, and `README.md` argued the case at length.
-That rested on the router having a v6 uplink to masquerade onto.
-
-**It does not.**
+The uplink is IPv4 only.
 `eth0` takes a v4 DHCP lease and a link-local,
-with no global v6 and no v6 default route:
+with no global v6 and no v6 default route,
+so IPv4 is the family that reaches the internet:
 
 ```text
 2: eth0: inet 192.168.1.27/24
@@ -126,44 +112,16 @@ with no global v6 and no v6 default route:
 default via 192.168.1.1 dev eth0
 ```
 
-An IPv6-only mesh therefore has no path off this router at all,
-whatever batman and the firewall do.
-So the mesh is dual stack:
+The mesh is therefore dual stack.
+The IPv6 ULA, EUI-64 from each radio's MAC,
+is the mesh's own layer and works with no router present.
+The IPv4, on `192.168.12.0/24` from roster position,
+is the way out and the way in from a laptop.
+Both are stamped into `25-bat0.network` by `install_network_stack.sh`;
+v4 host octets start at `.11` and stay below `.100`
+so a node cannot collide with a laptop's lease.
 
-| Family | Where it comes from | What it is for |
-| --- | --- | --- |
-| IPv6 ULA | static, EUI-64 from the radio MAC | the mesh's own layer; works with no router present |
-| IPv4 | static, roster position, `192.168.12.0/24` | the way out, and the way in from a laptop |
-
-Both are stamped into `25-bat0.network` by `install_network_stack.sh`.
-The v4 host octets start at `.11` and are bounded below `.100`
-so a node can never collide with a laptop's lease.
-See `node_mesh_addr4` in `halow-lib.sh`.
-
-### The Router's ULA Goes on `br-ahwlan`, Not `bat0`
-
-It was on `bat0`, and **it never answered**.
-
-A bridge port does not terminate L3.
-Frames arriving on it are handed to the bridge,
-which delivers to the local stack only on the bridge's own MAC
-(`94:83:c4:89:3c:e3`), not the port's.
-So the address existed, `ip addr` showed it, `ip -6 route` showed
-`fdc7:37f3:e24a::/64 dev bat0`, and every ping to it was lost:
-
-```text
-3 packets transmitted, 0 packets received, 100% packet loss
-```
-
-Moving it to `br-ahwlan` made it answer on the first try, ~7-9 ms over the mesh.
-This is what the Jetsons' `Gateway=` in `25-bat0.network` points at,
-so it had been aimed at a dead address for as long as it existed --
-invisible, because v4 carries the uplink and nothing else depended on it.
-
-It belongs in UCI, not in `halow-mesh`:
-`br-ahwlan` is netifd's interface, and an address added behind netifd's back is
-wiped by the next `ifup ahwlan` or network restart --
-a fault that surfaces hours later with no obvious cause.
+### The Router's ULA Lives on `br-ahwlan`
 
 ```sh
 uci set network.ahwlan.ip6addr='fdc7:37f3:e24a:0:0ebf:74ff:fe00:3757/64'
@@ -171,105 +129,79 @@ uci commit network
 /etc/init.d/network restart
 ```
 
-The general lesson is worth keeping separate from this instance:
-**an IP on a bridge port is almost always a mistake.**
-It fails silently and every diagnostic short of an actual packet says it is fine.
+It is on the bridge and not on `bat0`,
+because an address on a bridge *port* does not answer:
+frames arriving on the port go to the bridge,
+which delivers to the local stack only on the bridge's own MAC (`94:83:c4:89:3c:e3`).
+
+It is in UCI and not in `halow-mesh`, because `br-ahwlan` is netifd's interface,
+and an address added behind netifd's back is wiped by the next `ifup ahwlan`
+or network restart.
+
+This is the address the Jetsons' `Gateway=` in `25-bat0.network` points at.
 
 ## The Bridge
 
-`bat0` is a port of `br-ahwlan`.
-This is the single most consequential choice in the whole setup,
-it contradicts what earlier versions of this document recommended, and it is deliberate.
+`bat0` is a port of `br-ahwlan`,
+which puts the Jetsons in `192.168.12.0/24` alongside the laptops on the APs.
+That is what delivers both of the things the router is for:
+a Jetson reaches the uplink with no per-node routing,
+no NAT66 and no dependence on batman gateway election,
+and a laptop on `heylo-wifi` runs `ssh robot@192.168.12.13` with no jump host,
+no static route, and nothing configured on either end.
 
-**What it buys.**
-The Jetsons land in `192.168.12.0/24` alongside the laptops on the APs.
-That single fact delivers both of the things the router is for:
+The cost is on the radio.
+Every broadcast and multicast frame on the LAN, ARP and mDNS and SSDP and DHCP,
+floods into a 1 MHz channel carrying a few hundred kbit/s. batman cannot narrow
+multicast either, there being no IGMP or MLD querier on the bridge, so it floods that
+too.
+A few chatty laptops can saturate the link they are supposed to be measuring.
 
-- a Jetson reaches the uplink with no per-node routing, no NAT66, and no
-  dependence on batman gateway election
-- a laptop on `heylo-wifi` runs `ssh user@192.168.12.13` with no jump host, no
-  static route, and nothing configured on either end
+That cost is unmeasured.
+Run `batman_oracle.sh tp` with and without clients on the APs
+before scaling past a handful,
+and treat any throughput figure taken with laptops attached as contaminated.
 
-**What it costs.**
-Every broadcast and multicast frame on the LAN -- ARP, mDNS, SSDP,
-DHCP -- floods into a 1 MHz channel carrying a few hundred kbit/s. batman says
-so itself at boot:
-
-```text
-batman_adv: bat0: No IGMP Querier present - multicast optimizations disabled
-batman_adv: bat0: No MLD Querier present - multicast optimizations disabled
-```
-
-With no querier, batman cannot narrow multicast and floods it.
-Three chatty laptops can saturate the link they are supposed to be measuring.
-
-**This cost is unmeasured.**
-Nobody has run `batman_oracle.sh tp` before and after.
-Do that before scaling past a handful of clients,
-and treat any throughput figure taken with laptops on the AP as contaminated.
-
-The routed alternative -- give the LAN its own `/64`
-and forward `lan` -> `mesh` -- is what earlier versions of this document insisted on.
-It is quieter on the radio and it is strictly more configuration: a prefix,
-a forwarding rule, and a return path on every node.
-It was never built.
+The routed alternative is to give the LAN its own `/64` and forward `lan` -> `mesh`.
+It is quieter on the radio and it is more configuration: a prefix, a forwarding rule,
+and a return path on every node.
 If the broadcast load turns out to matter, that is the direction to go.
 
 ## Firewall
 
-Two zones matter and one is a decoy.
+Two zones carry traffic:
 
 | Zone | Networks | input/output/forward |
 | --- | --- | --- |
 | `wan` | `wan`, `wan6` | REJECT / ACCEPT / REJECT, `masq`, `masq6`, `mtu_fix` |
 | `ahwlan` | `ahwlan` | ACCEPT / ACCEPT / ACCEPT |
 
-Plus `forwarding: ahwlan -> wan`, enabled.
-That is the entire path out.
+With `forwarding: ahwlan -> wan` enabled, that is the whole path out.
+Mesh packets match `ahwlan`,
+since `bat0` is a bridge port and they arrive on `br-ahwlan`.
 
-**There was a `mesh` zone naming networks `bat0` and `wwan`.**
-**Delete it if it is still there.**
-Neither network exists any more, so it binds nothing,
-and it never carried traffic even when they did: `bat0` is a bridge port,
-so mesh packets arrive on `br-ahwlan` and match `ahwlan`.
-It reads like the rule making the mesh work and it is not.
-That mattered during debugging -- checking a zone whose counters are structurally always
-zero.
+If a `mesh` zone naming networks `bat0` or `wwan` is still present, delete it.
+Those networks no longer exist, so it binds nothing,
+and it never carried traffic even when they did:
 
 ```sh
-uci show firewall | grep -E 'zone.*name|forwarding' # find it, check the index
+uci show firewall | grep -E 'zone.*name|forwarding' # check the index first
 uci delete firewall.@zone[3]
 uci commit firewall
 /etc/init.d/firewall restart
 ```
 
-**NAT66 (`masq6`) is on and currently does nothing**,
+NAT66 (`masq6`) is on and currently does nothing,
 because there is no v6 uplink to masquerade onto.
 Leave it: it costs nothing and it is what you want the moment the upstream gains IPv6.
-
-### `Section @forwarding[0] is disabled` Is Benign
-
-Every `/etc/init.d/firewall restart` prints it.
-It is GL.iNet's own disabled `lan` -> `wan` rule, and it predates everything here.
-It appears immediately after whatever you just committed and reads like a report on it.
-It is not.
-New sections land at the end; the index in the message is not yours.
 
 ## Persistence
 
 Attaching the radio to `bat0` is not UCI's job,
-and `/etc/rc.local` is the wrong place for it.
+and `/etc/rc.local` is the wrong place for it: a USB radio enumerates asynchronously,
+so no fixed point in boot is reliably after `wlan0` exists.
 
-**This failed in the field, so be precise about it.**
-`rc.local` ran `batctl meshif bat0 interface add wlan0` before `wlan0` existed.
-The command failed, boot continued, and the router came up with `bat0` present, up,
-bridged and addressed -- carrying no hard interface at all.
-The IBSS was still associated,
-`iw dev wlan0 station dump` showed the Jetson at a healthy signal,
-and every LuCI page looked correct.
-The only thing that showed it was `batctl meshif bat0 interface` printing nothing.
-
-Two files in `router/` replace that block:
+Two files in `router/` do it instead:
 
 | File | Job |
 | --- | --- |
@@ -284,94 +216,72 @@ ssh root@192.168.12.1 'chmod 0755 /etc/init.d/halow-mesh /etc/hotplug.d/net/30-h
                        /etc/init.d/halow-mesh start'
 ```
 
-Then strip the batman block from `/etc/rc.local`, leaving the header and `exit 0`.
-Leaving both is not harmless:
-`rc.local` runs first and its bare `interface add` is the call that fails on a re-run.
+`/etc/rc.local` must carry no batman lines.
+It runs first, and its bare `interface add` is the call that fails on a re-run.
 
-Two properties make it work, and they are worth preserving in any rewrite:
+Two properties matter if either file is ever rewritten.
 
-**It gates rather than orders.**
-`start()` waits for the real condition -- the netdev existing --
-and fails loudly on timeout.
-Same lesson as `halow-wait` on the Jetsons
-(see `README.md`): the signals available to order against are lies.
+`start()` gates on the real condition, the netdev existing, and fails loudly on timeout.
+Same reasoning as `halow-wait` on the Jetsons (see `README.md`).
 
-**It is idempotent, so the hotplug rule can fire at any time.**
-This is not belt-and-braces, it is load-bearing.
+`start()` is also idempotent,
+which is what makes the hotplug rule safe to fire at any time.
 `wlan0` is created and destroyed several times during a normal boot
 as netifd configures `radio2` and `wpa_supplicant_s1g` joins the IBSS,
-and each destruction silently drops it from batman.
-A normal boot looks like this:
+and each destruction drops it from batman.
+Every recreation fires the rule, so the script runs again and converges.
 
-```text
-15:02:26  netifd: radio2 (2998): Configuring morse device
-15:02:27  halow-mesh: added wlan0 to bat0
-15:02:28  batman_adv: bat0: Not using interface wlan0 (retrying later)
-15:02:28  halow-mesh: added wlan0 to bat0          <- again, after a recreation
-15:02:29  halow-mesh: wlan0 is already a bat0 hard interface
-15:02:29  batman_adv: bat0: Interface activated: wlan0
+Verify:
+
+```sh
+logread -e halow-mesh          # one pattern only; -e does not stack
+batctl meshif bat0 interface   # expect: wlan0: active
+ls /etc/rc.d/ | grep halow     # expect S95halow-mesh and K10halow-mesh
 ```
-
-Repeated adds are the design working, not a fault.
-It converges because every recreation fires the rule,
-so the script always runs after the last one.
-
-`wpa_supplicant_s1g` and the IBSS interface itself are handled by UCI
-(`wireless.radio2` type `morse`, `wireless.wifinet4` mode `adhoc`),
-which is a correction to older copies of this document -- see below.
 
 ### MTU 1532
 
-batman-adv prepends a 32-byte header.
-A 1500-MTU hard interface makes it fragment every full-size frame at layer 2,
-and the kernel says so at attach time and then carries on regardless:
-
-```text
-batman_adv: bat0: The MTU of interface wlan0 is too small (1500) ... Setting
-the MTU to 1532 would solve the problem.
-```
-
+batman-adv prepends a 32-byte header,
+so a 1500-MTU hard interface fragments every full-size frame at layer 2.
 Doubling the frame count is affordable on Ethernet
 and is not affordable on a 1 MHz link.
+
 The init script sets it before attaching, on every run,
 since a recreated `wlan0` comes back at the default.
 The Morse driver accepts 1532.
 
-**Both ends must do this** -- batman fragments on the transmitting node,
-against its own outgoing interface, so fixing one end only fixes one direction.
-The Jetsons already do it in `halow0-ibss.service`; the router was the one missing it.
+Both ends need it. batman fragments on the transmitting node against its own outgoing
+interface, so fixing one end fixes one direction.
+The Jetsons do it in `halow0-ibss.service`.
 
 ### `mesh11sd` Must Be Off
 
 It is OpenWrt's 802.11s daemon.
-The mesh here is IBSS with `batman-adv` above it; 802.11s is a different,
+The mesh here is IBSS with `batman-adv` above it, and 802.11s is a different,
 incompatible mesh at the same layer
 (see the design note in `README.md` for why it was not the choice).
-It was found running after an unrelated change.
 
 ```sh
 /etc/init.d/mesh11sd stop
 /etc/init.d/mesh11sd disable
 ```
 
-Disable rather than `opkg remove`, so it is one command to put back.
+Disable it, so it is one command to put back.
 
-## Gateway Mode Is a Health Signal, Not a Mechanism
+## Gateway Mode
 
 `batctl meshif bat0 gw_mode server` is set, and the Jetsons are `client`.
 
-**It does not install a default route on anyone**,
-which is worth being blunt about
-because every description of batman gateway mode says it does.
+It does not install a default route on anyone,
+which is worth stating because most descriptions of batman gateway mode say it does.
 What batman elects a gateway *for* is DHCP:
 a client-mode node forwards DHCP to the elected server
 and takes its default route from the lease.
-This mesh has no DHCP -- addressing is static in both families --
+This mesh has no DHCP, addressing being static in both families,
 so the election happens, `batctl gwl` fills in, and no route is ever created.
 
-Set it anyway.
-`batctl gwl` on a Jetson is the one check
-that says "this node can see the uplink from here".
+It is still worth setting.
+`batctl gwl` on a Jetson tells you that node can see the uplink.
 The route itself is `Gateway=` in `25-bat0.network`,
 stamped per node by `install_network_stack.sh`.
 
@@ -386,16 +296,20 @@ uci commit wireless
 wifi reload radio0
 ```
 
-Reload `radio0` alone -- a bare `wifi reload` restarts both radios and drops you
+Reload `radio0` alone.
+A bare `wifi reload` restarts both radios and drops you
 if you are connected over either.
-This is two independent APs sharing a name, not a managed roam:
-clients pick a band themselves and sometimes pick badly,
+
+This is two independent APs sharing a name.
+Nothing coordinates them.
+Clients pick a band themselves and sometimes pick badly,
 and moving between them is a disconnect and reconnect.
 No 802.11r/k/v is configured.
 
-The HaLow radio is `radio2` and is driven through UCI as an `adhoc` iface.
-Its parameters must match the Jetsons exactly -- SSID, channel, op_class, country,
-beacon interval -- and only the address differs.
+The HaLow radio is `radio2`, driven through UCI as an `adhoc` iface.
+Its parameters must match the Jetsons exactly,
+SSID and channel and op_class and country and beacon interval,
+with only the address differing.
 
 ## Time
 
@@ -404,8 +318,7 @@ Cross-node measurements are only joinable if their timestamps agree,
 so every Jetson is a chrony client of this router
 and `batman_oracle.sh soak` refuses to log until chrony reports sync.
 That makes this box the fleet's clock authority.
-See
-[MONITORING.md](MONITORING.md).
+See [MONITORING.md](MONITORING.md).
 
 ```sh
 uci set system.ntp.enable_server='1'
@@ -416,7 +329,7 @@ uci commit system
 No firewall rule is needed: the `ahwlan` zone's input is ACCEPT,
 which already admits UDP/123.
 
-**busybox `sysntpd` will not serve time it does not have.**
+busybox `sysntpd` will not serve time it does not have.
 The GL-MT3000 has no RTC either,
 so with the uplink down at boot it comes up at the image's build date
 and refuses to be a time source at all.
@@ -434,8 +347,8 @@ allow fdc7:37f3:e24a::/48 # the fleet, and nothing else
 ```
 
 `local stratum 10` declares this box authoritative on its own say-so.
-That is a lie, but a *consistent* one -- every node agrees on the same wrong time,
-which is all cross-node joining actually requires.
+That is a lie, but a consistent one: every node agrees on the same wrong time,
+which is all cross-node joining requires.
 
 Over HaLow expect low single-digit milliseconds.
 Ample for correlating latency and throughput logs,
@@ -452,7 +365,6 @@ batctl meshif bat0 originators # every node, next hop, link quality
 batctl meshif bat0 gwl
 iw dev wlan0 station dump # IBSS peers
 morse_cli -i wlan0 stats  # PHY-level sanity, incl. temperature
-logread -e halow-mesh     # one pattern only; -e does not stack
 ```
 
 `originators` is the useful one in the field:
@@ -461,31 +373,13 @@ it shows multi-hop paths forming and re-forming as nodes move.
 Leave the router associated and idle a while before believing any of it.
 Association is the easy part.
 
-### End to End, from a Jetson
+From a Jetson, the other direction:
 
 ```sh
 ping -I bat0 192.168.12.1 # the router, over the mesh
 ping -I bat0 1.1.1.1      # the internet
-ssh user@192.168.12.13    # from a laptop on heylo-wifi, the other direction
+ssh robot@192.168.12.13   # from a laptop on heylo-wifi
 ```
-
-Use `-I bat0` whenever the node also has Ethernet or WiFi up,
-or a working reply may have gone out the other interface entirely and tested nothing.
-
-`ping6` to a public resolver fails
-and is **not** a broken mesh -- there is no v6 uplink.
-`ping6 <node>.mesh` between Jetsons is the v6 test that should pass.
-
-### Where It Breaks
-
-| Symptom | Fault |
-| --- | --- |
-| `batctl meshif bat0 interface` empty | the radio is detached; `halow-mesh` did not run, or `rc.local` still fights it |
-| `batctl o` empty, IBSS associated | same -- L2 is fine, batman is not. This is the silent one |
-| no `default via 192.168.12.1` on a Jetson | Jetson: rerun `install_network_stack.sh` |
-| router pings, internet does not | router: `ahwlan` -> `wan` forwarding, or `masq` |
-| `batctl gwl` empty | `gw_mode server` not set, or mesh not formed |
-| names do not resolve, addresses work | DNS, not routing: `resolvectl status bat0` |
 
 ## Radio Parameters
 
@@ -500,84 +394,23 @@ US S1G channelisation, `freq_MHz = 902 + 0.5 * channel`:
 
 Running 1 MHz on channel 33. 1 MHz also reaches MCS10
 (-107 dBm), which the wider channels do not have at all.
-**This is a fleet-wide decision -- every node must match**,
+This is a fleet-wide decision, so every node must match,
 and a bandwidth change needs both ends reconfigured.
 
-The driver reports S1G channels as their 5 GHz equivalents,
-so `iw dev` showing `channel 124 (5620 MHz), width: 20 MHz`
-for an S1G channel is expected and is not a misconfiguration.
-
-`s1g_prim_1mhz_chan_index` is the one people lose an evening to.
-It is which 1 MHz subchannel of the operating bandwidth is primary,
-and it must be less than the operating bandwidth --
-so at 1 MHz the only legal value is `0`.
-The Morse fork defaults it to `3`, suited to their 8 MHz reference setup,
-which fails validation here with `S1G Primary 1MHz index 3 invalid for operating BW 1`;
-the network block is then rejected and the radio silently never joins.
-Bump it only if the fleet widens: 0-1 at 2 MHz, 0-3 at 4, 0-7 at 8.
-
-### If the Router Associates and Then Falls Over
-
-Check the driver and firmware against a Jetson first:
-
-```sh
-morse_cli -i wlan0 version
-```
-
-The Jetsons build `morse.ko` from source via DKMS;
-the router runs whatever Morse shipped in its image,
-so the two drift apart without anyone choosing that.
-There is a report on Morse's forum of the MM8108 **2.0.0 driver on OpenWrt 3.1.1
-kernel-panicking shortly after two devices associate in IBSS mode**, which the reporter
-did not see on 1.17.9.
-Morse could not reproduce it and it may not apply here, but "worked at association,
-died a minute later" is distinctive enough to recognise rather than rediscover.
-The fix is to align the router with the pair the Jetsons are known good on.
-
-## What Changed, and Why
-
-Corrections against earlier versions of this document,
-kept because each cost real time to find.
-
-**"UCI does not model the S1G radio; disable it and drive the radio by hand."**
-Wrong for this image.
-`wireless.radio2` is `type 'morse'` and `wireless.wifinet4` is `mode 'adhoc'`;
-netifd creates `wlan0` and starts `wpa_supplicant_s1g` itself.
-The by-hand `iw phy ... interface add` and hand-written supplicant conf are not needed.
-What *is* outside UCI is attaching the radio to `bat0`,
-which is what `halow-mesh` exists for.
-
-**"Name the interface `halow0`, not `wlan0`."**
-Good advice on the Jetsons, where the reason is USB-driven predictable naming.
-Here netifd names it `wlan0` and it has never collided,
-because the SoC radios get `phyN-apN` names.
-Not worth changing.
-
-**"Route, do not bridge."** Reversed.
-See [The Bridge](#the-bridge) -- bridging is what makes both of the router's jobs work
-with no per-node configuration, and the broadcast cost it warned about is real but so
-far unmeasured.
-
-**"The mesh is IPv6-only; `ping 8.8.8.8` will never work."**
-Was true, is now false, and the reason is the uplink:
-no IPv6 on the WAN means an IPv6-only mesh cannot reach anything.
-See [Addressing](#addressing-why-there-is-ipv4).
-
-**"Put it in `rc.local`."** Cost a field failure.
-See
-[Persistence](#persistence).
-
-**"Set up a `mesh` firewall zone for `bat0`."**
-It has never carried a packet.
-Bridged `bat0` traffic arrives on `br-ahwlan` and matches `ahwlan`.
+`s1g_prim_1mhz_chan_index` is
+which 1 MHz subchannel of the operating bandwidth is primary,
+and it must be less than the operating bandwidth: 0 at 1 MHz, 0-1 at 2 MHz, 0-3 at 4,
+0-7 at 8.
+The Morse fork defaults it to `3`,
+which is wrong for this fleet and fails validation rather than warning.
 
 ## Open Questions
 
 - The broadcast cost of the bridge, unmeasured. `batman_oracle.sh tp` with and
   without laptops on the APs.
-- Whether anything should depend on the router's v6 ULA now that it answers.
-  The Jetsons' `Gateway=` points at it, but v4 carries the uplink and the v6
-  default route has no v6 upstream to reach.
+- Whether anything should depend on the router's v6 ULA.
+  The Jetsons' `Gateway=` points at it,
+  but v4 carries the uplink and the v6 default route has no v6 upstream to reach.
 - Whether an IGMP/MLD querier on `br-ahwlan` would let batman re-enable
   multicast optimisation, and what that is worth on a 1 MHz link.
 - Which Morse driver/firmware pair the kit image shipped with, against what the
