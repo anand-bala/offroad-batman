@@ -1,0 +1,151 @@
+#!/bin/sh /etc/rc.common
+#
+# Bring the HaLow IBSS radio into batman-adv and bridge the mesh onto the LAN.
+#
+# Replaces the block of commands that lived in /etc/rc.local. rc.local runs once,
+# at one fixed point in boot, and the radio is a USB device whose netdev netifd
+# creates asynchronously -- so it could run before wlan0 existed and leave bat0
+# with no hard interface at all. That is not hypothetical: it is exactly how the
+# mesh was found down, with the IBSS still associated at L2, `iw station dump`
+# looking healthy, and `batctl o` empty.
+#
+# Two properties follow, and they are the whole point of this file:
+#
+#   Gate, don't order.  start() waits for the real condition -- wlan0 present,
+#                       the bridge present -- and gives up loudly on timeout
+#                       rather than charging ahead into a half-built stack. Same
+#                       reasoning as usr/local/lib/halow/halow-wait on the
+#                       Jetsons, and for the same reason: the signals available
+#                       to order against are lies.
+#   Re-runnable.        Every step checks before acting, so the hotplug rule in
+#                       etc/hotplug.d/net/30-halow-mesh can call this again
+#                       whenever wlan0 reappears -- `wifi reload`, a replug of
+#                       the USB adapter, or anything else that recreates bat0.
+#                       Recovery becomes automatic instead of a remembered
+#                       command.
+#
+# Install:
+#   scp this to /etc/init.d/halow-mesh on the router, chmod 0755
+#   /etc/init.d/halow-mesh enable
+#   then delete the batman block from /etc/rc.local -- see docs/OPENWRT.md
+
+START=95
+STOP=10
+
+IFACE=wlan0
+BRIDGE=br-ahwlan
+MESH_IF=bat0
+
+# This router's mesh address. EUI-64 from the radio MAC against the fleet
+# prefix, i.e. the same value install_network_stack.sh derives for heylo-base on
+# the Jetson side. Written down here rather than derived because the router has
+# no copy of the roster; if ULA_PREFIX ever changes, this changes with it.
+MESH_ADDR=fdc7:37f3:e24a:0:0ebf:74ff:fe00:3757/64
+
+# 1500 + the 32-byte batman-adv header. Anything less and every full-size frame
+# is fragmented at layer 2 on the slowest link in the system.
+HARDIF_MTU=1532
+
+# Long enough for a USB radio to enumerate and netifd to build the bridge, short
+# enough that a genuinely absent adapter does not hold boot open indefinitely.
+WAIT_SECS=60
+
+LOCK=/var/lock/halow-mesh
+
+say() { logger -t halow-mesh "$@"; }
+
+# wait_for_link <name> -- return once the netdev exists, fail after WAIT_SECS.
+# Polling rather than a netlink wait keeps this to busybox tools, and it returns
+# the instant the link shows up, so the common case costs nothing.
+wait_for_link() {
+	local name="$1" i=0
+	while [ "$i" -lt "$WAIT_SECS" ]; do
+		ip link show "$name" >/dev/null 2>&1 && return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+start() {
+	# Boot and hotplug can both land here at once -- the adapter enumerating
+	# during boot fires the rule while the init script is already waiting.
+	# mkdir is the atomic test-and-set busybox gives us; the check-then-add
+	# below is not itself atomic and a concurrent pair would race on it.
+	if ! mkdir "$LOCK" 2>/dev/null; then
+		say "another run is in progress, skipping"
+		return 0
+	fi
+	trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+
+	wait_for_link "$IFACE" || {
+		say "giving up: $IFACE never appeared after ${WAIT_SECS}s"
+		rmdir "$LOCK" 2>/dev/null
+		return 1
+	}
+	wait_for_link "$BRIDGE" || {
+		say "giving up: $BRIDGE never appeared after ${WAIT_SECS}s"
+		rmdir "$LOCK" 2>/dev/null
+		return 1
+	}
+
+	modprobe batman-adv 2>/dev/null
+
+	# batman-adv prepends a 32-byte header, so a 1500-MTU hard interface makes
+	# it fragment every full-size frame at layer 2. The kernel says so at add
+	# time and then carries on regardless:
+	#
+	#   batman_adv: bat0: The MTU of interface wlan0 is too small (1500) ...
+	#   Setting the MTU to 1532 would solve the problem.
+	#
+	# Doubling the frame count is affordable on Ethernet and is not affordable
+	# on a 1 MHz HaLow link carrying a few hundred kbit/s. Set before the add,
+	# because that is when batman sizes itself against the hard interface.
+	#
+	# Tolerated rather than required: if the driver refuses the larger MTU the
+	# mesh still works, just fragmented, and that is no reason to leave the
+	# radio detached. Set on every run, since a recreated wlan0 comes back at
+	# the default.
+	if ip link set "$IFACE" mtu "$HARDIF_MTU" 2>/dev/null; then
+		say "$IFACE MTU set to $HARDIF_MTU"
+	else
+		say "$IFACE refused MTU $HARDIF_MTU; batman will fragment at layer 2"
+	fi
+
+	# Adding a hard interface that is already there is an error, not a no-op,
+	# so this has to be checked rather than just re-issued.
+	if batctl meshif "$MESH_IF" interface 2>/dev/null | grep -q "^$IFACE:"; then
+		say "$IFACE is already a $MESH_IF hard interface"
+	else
+		batctl meshif "$MESH_IF" interface add "$IFACE" || {
+			say "failed to add $IFACE to $MESH_IF"
+			rmdir "$LOCK" 2>/dev/null
+			return 1
+		}
+		say "added $IFACE to $MESH_IF"
+	fi
+
+	# Announce as a gateway. This does not install a route on anyone -- batman
+	# elects a gateway for DHCP, and this mesh has none -- but `batctl gwl` on a
+	# Jetson is the one check that says "I can see the uplink from here".
+	batctl meshif "$MESH_IF" gw_mode server
+
+	# Bridging the mesh onto the LAN is what puts the Jetsons in 192.168.12.0/24:
+	# it is how they reach the v4 uplink, and how a laptop on the 2.4/5 GHz APs
+	# reaches them to ssh in. It is also what floods LAN broadcast into a 1 MHz
+	# channel -- a real cost, taken deliberately. See docs/OPENWRT.md.
+	ip link set dev "$MESH_IF" master "$BRIDGE"
+	ip link set "$MESH_IF" up
+
+	# Already-present is the normal case on a re-run, not a fault.
+	ip -6 addr add dev "$MESH_IF" "$MESH_ADDR" 2>/dev/null
+
+	say "up: $IFACE -> $MESH_IF -> $BRIDGE"
+	rmdir "$LOCK" 2>/dev/null
+}
+
+stop() {
+	ip link set "$MESH_IF" nomaster 2>/dev/null
+	batctl meshif "$MESH_IF" interface del "$IFACE" 2>/dev/null
+	say "down"
+}

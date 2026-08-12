@@ -597,6 +597,30 @@ A ping issued from the laptop would cross Ethernet and this router
 before touching a radio,
 and would say nothing about the hop under test.
 
+## 5E. One SSID Across Both Bands
+
+The router's own 2.4 and 5 GHz radios both land on `br-ahwlan`, with the same
+encryption and the same PSK, so there is no reason for them to answer to
+different names -- and they did, `haylo-wifi` and `heylo-wifi`, differing by one
+letter, which is a typo rather than a design.
+
+```sh
+uci set wireless.default_radio0.ssid='heylo-wifi'
+uci commit wireless
+wifi reload radio0
+```
+
+Reload `radio0` alone. A bare `wifi reload` restarts both radios and drops you
+if you are connected over either of them; even scoped, anything on the old name
+is disconnected and has to reconnect.
+
+This is two independent APs sharing a name, not a managed roam.
+Clients pick a band themselves and sometimes pick badly -- 2.4 GHz at range
+where 5 GHz would be faster -- and moving between them is a disconnect and
+reconnect, since no 802.11r/k/v is configured. Both are acceptable for laptops
+that mostly stay put, which is what these are for
+(see [5D](#5d-getting-a-laptop-onto-the-mesh)).
+
 ## 6. Verify
 
 LuCI covers the surrounding network state -- Status > Overview for interface state,
@@ -653,25 +677,79 @@ because ULA packets left the router unmasqueraded and no reply could return.
 
 Step 4 and step 5 are already persistent -- LuCI wrote them to `/etc/config/network`,
 and netifd replays them on boot.
-Step 3 is not: the interface creation and `wpa_supplicant_s1g` are outside UCI
-and have to be re-run.
+Attaching the radio to `bat0` is not,
+and `/etc/rc.local` is the wrong place for it.
 
-**LuCI:** System > Startup, *Local Startup* tab, which is `/etc/rc.local` in a text box.
-Put the `iw phy ... interface add` and `wpa_supplicant_s1g` lines there,
-above the `exit 0`.
-`bat0` and its hardif then come up on their own once `$IFACE` appears.
+**This has already failed once in the field, so it is worth being precise about.**
+`rc.local` ran its `batctl meshif bat0 interface add wlan0` before `wlan0` existed.
+The command failed, boot carried on, and the router came up with `bat0`
+present, up, bridged, addressed -- and carrying no hard interface at all.
+The IBSS was still associated,
+`iw dev wlan0 station dump` listed the Jetson at a healthy signal,
+and every LuCI page looked right.
+The only thing that showed it was `batctl meshif bat0 interface` printing nothing,
+with `batctl o` empty beside it.
+A USB radio enumerates asynchronously; nothing about a fixed point in boot
+can be relied on to be after that.
 
-Include the phy-detection loop from step 3 rather than a literal phy name.
-A USB adapter can enumerate in a different order across reboots,
-and a boot script that hardcodes `phy1` will one day create the IBSS interface on one of
-the SoC radios instead.
-`$IFACE` is safe to hardcode -- you chose it.
+Two files replace the `rc.local` block, both in `router/` in this repo:
 
-Deliberately leave this until the parameters stop changing -- a half-working config
-that auto-starts on boot is harder to debug than one you invoke by hand.
-If `rc.local` proves too early or too late in boot -- a real risk with a USB adapter
-that enumerates asynchronously -- promote it to a procd init script,
-which the same page lists under *Initscripts*, or trigger it from a USB hotplug rule.
+| File | Job |
+| --- | --- |
+| `etc/init.d/halow-mesh` | waits for `wlan0` and the bridge, then attaches, sets `gw_mode server`, bridges and addresses `bat0` |
+| `etc/hotplug.d/net/30-halow-mesh` | re-runs the above whenever `wlan0` reappears |
+
+```sh
+scp router/etc/init.d/halow-mesh root@192.168.12.1:/etc/init.d/halow-mesh
+scp router/etc/hotplug.d/net/30-halow-mesh root@192.168.12.1:/etc/hotplug.d/net/
+ssh root@192.168.12.1 'chmod 0755 /etc/init.d/halow-mesh /etc/hotplug.d/net/30-halow-mesh
+                       /etc/init.d/halow-mesh enable
+                       /etc/init.d/halow-mesh start'
+```
+
+Then **remove the batman block from `/etc/rc.local`**,
+leaving only the comment header and `exit 0`.
+Leaving both in place is not harmless:
+`rc.local` runs first, and its bare `interface add` is the call that fails noisily
+on a re-run.
+
+The init script gates on the real condition rather than ordering against a proxy for it,
+which is the same lesson as `halow-wait` on the Jetsons
+(see the boot-ordering note in `README.md`) --
+the signals available to order against are lies,
+so wait for the thing itself and fail loudly on timeout.
+It is also idempotent throughout,
+which is what makes the hotplug rule safe to fire at any time
+and turns "the mesh dropped, run the `batctl` command again"
+into something that no longer needs a human.
+
+Watch it work:
+
+```sh
+logread -e halow-mesh
+batctl meshif bat0 interface # expect: wlan0: active
+```
+
+`wpa_supplicant_s1g` and the IBSS interface itself are now handled by UCI
+(`wireless.wifinet4`, an `adhoc` iface on the `morse` radio),
+so step 3's by-hand creation is only needed while the parameters are still moving.
+
+### `mesh11sd` Must Be Off
+
+`mesh11sd` is OpenWrt's 802.11s mesh daemon.
+It has no business on this router:
+the mesh here is IBSS at layer 2 with `batman-adv` above it,
+and 802.11s is a different, incompatible mesh at the same layer
+(see the design note in `README.md` for why 802.11s was not the choice).
+It was found running after an unrelated change and is not part of this setup.
+
+```sh
+/etc/init.d/mesh11sd stop
+/etc/init.d/mesh11sd disable
+```
+
+Disable rather than `opkg remove`, so it is one command to put back
+if it turns out something else on the image wanted it.
 
 ## Bandwidth
 

@@ -1,0 +1,20 @@
+#!/bin/sh
+#
+# Re-run the mesh setup whenever the HaLow netdev appears.
+#
+# The init script alone covers boot. This covers everything after it: a
+# `wifi reload`, a replug of the USB adapter, or anything that tears down and
+# recreates wlan0. Each of those leaves bat0 without a hard interface, which is
+# a silent failure -- the IBSS stays associated and only `batctl o` shows it.
+#
+# Backgrounded because a hotplug handler blocks its worker, and the init script
+# is willing to wait up to a minute for the bridge. The lock inside start()
+# makes the overlap with a concurrent boot-time run safe.
+#
+# Install: /etc/hotplug.d/net/30-halow-mesh on the router, chmod 0755
+
+[ "$ACTION" = "add" ] || exit 0
+[ "$INTERFACE" = "wlan0" ] || exit 0
+[ -x /etc/init.d/halow-mesh ] || exit 0
+
+/etc/init.d/halow-mesh start >/dev/null 2>&1 &
