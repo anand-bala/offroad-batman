@@ -100,6 +100,29 @@ but the router is not announcing as a gateway.
 puts the fault on the router's WAN side --
 firewall zone or NAT66, see [docs/OPENWRT.md](docs/OPENWRT.md).
 
+### DNS on the Bench: Mesh Down, Ethernet Up
+
+`bat0` claims the catch-all DNS routing domain (`Domains=~.`),
+which on its own sends **every** lookup to the mesh resolvers --
+even with the mesh down and a healthy Ethernet uplink right there.
+The symptom is total: `getent hosts google.com` fails with
+`No route to host` while `ping 8.8.8.8` over Ethernet works fine,
+which reads exactly like a dead uplink and is not one.
+
+The installer therefore stamps the same `~.` routing domain onto every
+NetworkManager Ethernet profile present at install time.
+`resolved` then queries both scopes and the first good answer wins:
+Ethernet answers on the bench, the mesh answers in the field,
+and with both up the race is harmless.
+
+Profiles minted *after* the install are covered too:
+NetworkManager creates a fresh `Wired connection N` for every new
+dongle (a swapped adapter reintroduced the whole failure once),
+so a dispatcher hook
+(`etc/NetworkManager/dispatcher.d/90-dns-mesh-coexist`)
+stamps each Ethernet profile at the moment it activates.
+`journalctl -t dns-mesh-coexist` shows it firing.
+
 ## Fleet Configuration
 
 The one file to edit is `etc/bat-hosts`: one line per node, radio MAC to name.

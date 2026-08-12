@@ -42,6 +42,12 @@ Gateway=fd12:3456:789a::1
 # gateway above. The v4 addresses everyone has memorised are useless here.
 # Google and Cloudflare respectively; Domains=~. sends non-.local, non-.mesh
 # lookups this way rather than to whatever eth0 last advertised.
+#
+# ~. is a monopoly unless another link claims it too, and on the bench that
+# monopoly is a bug: mesh down, Ethernet healthy, every lookup still sent here
+# to die with "No route to host". The installer therefore stamps ~. onto the
+# NetworkManager Ethernet profiles as well (see install_network_stack.sh), so
+# resolved races both scopes and whichever side is reachable answers.
 DNS=2001:4860:4860::8888
 DNS=2606:4700:4700::1111
 Domains=~.

@@ -132,12 +132,19 @@ log "Setting up B.A.T.M.A.N. networking stack as follows:
 # overwriting it is the intended behaviour.
 while IFS= read -r f; do
   as_root install -D -o root -g root -m 0644 "$f" "/$f"
-done < <(find etc -type f ! -name 'wpa_supplicant-halow0.conf')
+done < <(find etc -type f ! -name 'wpa_supplicant-halow0.conf' \
+  ! -path 'etc/NetworkManager/dispatcher.d/*')
 
 # Supplicant conf may hold a PSK -> 0600.
 as_root install -D -o root -g root -m 0600 \
   etc/wpa_supplicant/wpa_supplicant-halow0.conf \
   /etc/wpa_supplicant/wpa_supplicant-halow0.conf
+
+# Dispatcher hooks must be executable or NetworkManager silently ignores
+# them -> 0755, excluded from the 0644 sweep above.
+as_root install -D -o root -g root -m 0755 \
+  etc/NetworkManager/dispatcher.d/90-dns-mesh-coexist \
+  /etc/NetworkManager/dispatcher.d/90-dns-mesh-coexist
 
 # Stamp this node's ULA address and its default route into the installed copy
 # of 25-bat0.network. Done to a temp copy, never in place: an in-place sed
@@ -159,6 +166,52 @@ else
 fi
 as_root install -D -o root -g root -m 0644 \
   "$STAMPED" /etc/systemd/network/25-bat0.network
+
+# DNS coexistence with a bench uplink.
+#
+# 25-bat0.network claims Domains=~. -- the catch-all routing domain -- so that
+# in the field every lookup goes to the mesh resolvers rather than to whatever
+# a long-gone bench network last advertised. resolved gives a ~. link absolute
+# priority, which has a sharp edge on the bench: with the mesh down, lookups
+# still go only to bat0's (unreachable) resolvers, and the node reads as "no
+# internet" while a healthy Ethernet uplink sits right beside it.
+#
+# The remedy is to stamp ~. onto the NetworkManager Ethernet profiles too.
+# With more than one ~. link, resolved queries them all and the first good
+# answer wins: bench Ethernet answers while the mesh is down, the mesh answers
+# in the field where there is no Ethernet, and with both up the race is
+# harmless -- public names resolve the same either way. Profiles that carry no
+# DNS server (the lidar links) contribute no DNS scope and are unaffected.
+#
+# This loop covers the profiles that exist right now, live, without waiting
+# for a reconnect. Profiles minted later -- a swapped USB dongle mints a fresh
+# "Wired connection N" -- are caught at activation by the dispatcher hook
+# installed above (etc/NetworkManager/dispatcher.d/90-dns-mesh-coexist), which
+# is what makes the fix stick across hardware swaps.
+if command -v nmcli >/dev/null; then
+  while IFS=: read -r con_name con_type; do
+    [[ $con_type == *ethernet* ]] || continue
+    # Per address family, tolerating rejection: a method like ignore or
+    # disabled refuses dns-search outright (the lidar links do), and rightly
+    # so -- that family carries no DNS to coexist with. The refusal IS the
+    # skip. A family with no DNS servers accepts the stamp but resolved
+    # creates no scope for it, so it is inert there too.
+    stamped=""
+    as_root nmcli con mod "$con_name" ipv4.dns-search '~.' 2>/dev/null && stamped=1
+    as_root nmcli con mod "$con_name" ipv6.dns-search '~.' 2>/dev/null && stamped=1
+    if [[ -n $stamped ]]; then
+      log "stamped DNS routing domain '~.' onto '${con_name}'"
+    else
+      log "skipped '${con_name}': no DNS-capable address family"
+    fi
+  done < <(nmcli -t -f NAME,TYPE con show)
+  # reapply, not `con up`: no link flap, so an install run over that very
+  # interface (SSH) survives it.
+  while IFS=: read -r dev dev_type state; do
+    [[ $dev_type == ethernet && $state == connected ]] || continue
+    as_root nmcli device reapply "$dev" >/dev/null 2>&1 || true
+  done < <(nmcli -t -f DEVICE,TYPE,STATE device status)
+fi
 
 # Stamp the same gateway address into the chrony drop-in, for the same reason:
 # derived, never written down, so a ULA_PREFIX override moves the time source
