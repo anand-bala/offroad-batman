@@ -1,58 +1,78 @@
 # L3 + naming for the mesh.
 #
-# IPv6 ULA only: static, self-derived, no router advertisements and no DHCP.
-# mDNS makes <hostname>.local resolvable peer-to-peer across the mesh, so the
-# actual address value never has to be typed by a human.
+# Dual stack, both halves static, no router advertisements and no DHCP:
 #
-# IPv6 ONLY -- there is no IPv4 on this interface, by design. Nothing on the
-# mesh can reach an IPv4 literal, so `ping 8.8.8.8` fails here even with the
-# uplink perfectly healthy. Use the v6 resolvers; see README.md.
+#   IPv6 ULA   fleet-wide /64 plus a per-node EUI-64 suffix. The mesh's own
+#              addressing, and the only half that works with no router present.
+#   IPv4       a host address on the router's LAN /24. The mesh is bridged into
+#              that LAN on the router (bat0 is a port of br-ahwlan), so a Jetson
+#              is L2-adjacent to everything on it: the uplink out, and the
+#              laptops on the 2.4/5 GHz APs coming the other way.
 #
-# ############################  PER-NODE  ##############################
-# Replace the host suffix in Address= below.
-#   * The /48 PREFIX (fd12:3456:789a::) MUST be identical on every node.
-#     Generate it ONCE at random (RFC 4193) for the whole fleet.
-#     A per-node prefix silently splits the fleet into unreachable subnets.
-#   * The SUFFIX is unique per node -- derive it EUI-64 style from the radio's
-#     permanent MAC so it is deterministic and collision-free.
-# #####################################################################
+# mDNS makes <hostname>.local resolvable peer-to-peer over both, so the actual
+# address value never has to be typed by a human.
+#
+# ###################### WHY THERE IS IPv4 HERE AT ALL ######################
+# This file was IPv6-only by design, and README said so at length. That rested
+# on the router having a v6 uplink to masquerade onto. It does not: eth0 gets a
+# v4 DHCP lease and a link-local, no global v6 and no v6 default route. An
+# IPv6-only mesh therefore has no path off the router at all, whatever batman
+# and the firewall do. IPv4 is not a preference here, it is the only family
+# with a way out.
+# ###########################################################################
+#
+# Every value below is stamped by install_network_stack.sh from etc/bat-hosts.
+# The placeholders are what an unstamped copy looks like; networkd never sees
+# them, because the stamped copy overwrites this one during install.
 
 [Match]
 Name=bat0
 
 [Network]
-# SHARED prefix, PER-NODE suffix
-Address=fd12:3456:789a::1/64
+# SHARED /64 prefix, PER-NODE EUI-64 suffix.
+Address=IPV6_ADDRESS_PLACEHOLDER
+
+# PER-NODE host octet, from roster position. Deleted when this node is not in
+# the roster, rather than written half-formed.
+Address=IPV4_ADDRESS_PLACEHOLDER
+
 IPv6AcceptRA=no
 LinkLocalAddressing=ipv6
 MulticastDNS=yes
 DHCP=no
 
-# The uplink. Stamped by install_network_stack.sh from the roster entry named
-# by $GATEWAY_NAME, so it tracks a ULA_PREFIX override instead of drifting from
-# it. IPv6AcceptRA=no above means nothing else will ever install a default
-# route on this link -- without this line the mesh has no way out, which is
-# exactly the "Network is unreachable" that sent us looking.
+# The uplink, in both families. Stamped from the roster entry named by
+# $GATEWAY_NAME so they track a ULA_PREFIX override instead of drifting from it.
+# IPv6AcceptRA=no and DHCP=no above mean nothing else will ever install a
+# default route on this link -- without these lines the mesh has no way out,
+# which is exactly the "Network is unreachable" that sent us looking.
 #
-# Not conditional on the router being up: a default route pointing at an absent
-# gateway costs nothing, and batman reconverges on its own when it returns.
-Gateway=fd12:3456:789a::1
+# Neither is conditional on the router being up: a default route pointing at an
+# absent gateway costs nothing, and batman reconverges on its own when it
+# returns. Node-to-node traffic never consults them.
+Gateway=IPV6_GATEWAY_PLACEHOLDER
+Gateway=IPV4_GATEWAY_PLACEHOLDER
 
-# Resolvers must be reachable over the mesh, i.e. IPv6 and routed through the
-# gateway above. The v4 addresses everyone has memorised are useless here.
-# Google and Cloudflare respectively; Domains=~. sends non-.local, non-.mesh
-# lookups this way rather than to whatever eth0 last advertised.
+# The resolver is the router's dnsmasq, over IPv4, for the same reason the
+# addressing above is dual stack: it is the one that can actually answer. The
+# v6 public resolvers this file used to name are unreachable across a v4-only
+# uplink, and pointing at them costs a timeout per lookup rather than an error.
 #
-# ~. is a monopoly unless another link claims it too, and on the bench that
-# monopoly is a bug: mesh down, Ethernet healthy, every lookup still sent here
-# to die with "No route to host". The installer therefore stamps ~. onto the
-# NetworkManager Ethernet profiles as well (see install_network_stack.sh), so
-# resolved races both scopes and whichever side is reachable answers.
-DNS=2001:4860:4860::8888
-DNS=2606:4700:4700::1111
-# Domains=~.
+# With the router absent there is no DNS at all, by design -- but <name>.local
+# still resolves over mDNS and <name>.mesh out of /etc/hosts, so node-to-node
+# work does not depend on this line.
+#
+# Restore these two and drop the placeholder if the uplink ever gains IPv6:
+#   DNS=2001:4860:4860::8888
+#   DNS=2606:4700:4700::1111
+DNS=IPV4_DNS_PLACEHOLDER
+
+# No Domains=~. here. It would hand this link a resolver monopoly, and with the
+# mesh down every lookup would go to an unreachable router to die rather than to
+# a healthy bench uplink sitting right beside it. See the DNS coexistence notes
+# in install_network_stack.sh for the history.
 
 [Link]
-# Assign the address even on a "mesh of one" (no peers yet), rather than
+# Assign the addresses even on a "mesh of one" (no peers yet), rather than
 # waiting for carrier that only appears once a neighbour shows up.
 ConfigureWithoutCarrier=yes

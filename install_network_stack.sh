@@ -89,6 +89,29 @@ IPV6_ADDR="${ULA_PREFIX}:$(eui64_identifier "$RADIO")/64"
 # node_name for the lookup order; override by exporting NODE_NAME.
 : "${NODE_NAME:=$(node_name "$RADIO" ./etc/bat-hosts)}"
 
+# The IPv4 half of the mesh: the router's LAN, which bat0 is bridged into on the
+# router side. MESH_V4_GATEWAY is the router's own address on it, and is written
+# down rather than derived -- it belongs to br-ahwlan, which is UCI's to set and
+# has no roster entry to derive from.
+#
+# MESH_V4_BASE offsets node addresses away from .1 and keeps them below the
+# dnsmasq pool that starts at .100, so a node can never be handed an address a
+# laptop already holds. See node_mesh_addr4, which enforces both bounds.
+: "${MESH_V4_SUBNET:=192.168.12}"
+: "${MESH_V4_BASE:=10}"
+: "${MESH_V4_GATEWAY:=${MESH_V4_SUBNET}.1}"
+
+# This node's static IPv4 on that LAN, from its roster position. Empty when the
+# node is absent from the roster or the roster has outgrown the usable octets,
+# in which case the mesh still comes up v6-only -- degraded, but not broken.
+IPV4_ADDR=$(node_mesh_addr4 "$NODE_NAME" ./etc/bat-hosts "$MESH_V4_SUBNET" "$MESH_V4_BASE")
+if [[ -n $IPV4_ADDR ]]; then
+  IPV4_ADDR="${IPV4_ADDR}/24"
+else
+  warn "no IPv4 for '${NODE_NAME}': absent from etc/bat-hosts, or past the usable range"
+  warn "this node will be IPv6-only, and the v4-only uplink will be unreachable from it"
+fi
+
 # The roster name of the node holding the uplink -- the OpenWrt travel router.
 # Its mesh address becomes every other node's default route. Override by
 # exporting GATEWAY_NAME; set it empty to install no default route at all,
@@ -105,6 +128,7 @@ IPV6_ADDR="${ULA_PREFIX}:$(eui64_identifier "$RADIO")/64"
 # Empty when this node IS the gateway (it does not route to itself), when
 # GATEWAY_NAME is cleared, or when the name is absent from the roster.
 GATEWAY_ADDR=""
+GATEWAY4_ADDR=""
 if [[ -n $GATEWAY_NAME && $GATEWAY_NAME != "$NODE_NAME" ]]; then
   GATEWAY_ADDR=$(node_mesh_addr "$GATEWAY_NAME" ./etc/bat-hosts "$ULA_PREFIX")
   if [[ -z $GATEWAY_ADDR ]]; then
@@ -112,6 +136,12 @@ if [[ -n $GATEWAY_NAME && $GATEWAY_NAME != "$NODE_NAME" ]]; then
     # loudly rather than leaving it to be found by a failed ping in the field.
     warn "gateway '$GATEWAY_NAME' not in etc/bat-hosts; no default route will be set"
   fi
+  # The v4 gateway is not derived and so cannot go missing the same way. It is
+  # gated on the same condition only so that a node declared to be the gateway,
+  # or a bench pair with GATEWAY_NAME cleared, gets no default route in either
+  # family -- one stack routing to an absent router while the other does not is
+  # a worse state to debug than neither doing so.
+  GATEWAY4_ADDR="$MESH_V4_GATEWAY"
 fi
 
 log "Setting up B.A.T.M.A.N. networking stack as follows:
@@ -120,7 +150,9 @@ log "Setting up B.A.T.M.A.N. networking stack as follows:
   HaLow Interface:    ${RADIO}
   HaLow MAC Address:  ${MAC}
   IPv6 Address:       ${IPV6_ADDR}
+  IPv4 Address:       ${IPV4_ADDR:-<none> (not in the roster, or past the usable range)}
   Default Route:      ${GATEWAY_ADDR:-<none> (this node is the gateway, or none is configured)}
+  Default Route (v4): ${GATEWAY4_ADDR:-<none> (this node is the gateway, or none is configured)}
 "
 
 # --------------------------------------------------------------------------------
@@ -130,9 +162,16 @@ log "Setting up B.A.T.M.A.N. networking stack as follows:
 # 0644 for everything except the supplicant conf. bat-hosts is included: these
 # nodes only ever run the one mesh, so the shipped table is authoritative and
 # overwriting it is the intended behaviour.
+#
+# 25-bat0.network is excluded and installed by the stamping block below instead.
+# Copying the template here first would put a file full of placeholders into
+# /etc, and an install that then died before stamping would leave the node with
+# a .network networkd rejects outright -- no mesh address, over a failure that
+# happened after the file was already in place.
 while IFS= read -r f; do
   as_root install -D -o root -g root -m 0644 "$f" "/$f"
 done < <(find etc -type f ! -name 'wpa_supplicant-halow0.conf' \
+  ! -name '25-bat0.network' \
   ! -path 'etc/NetworkManager/dispatcher.d/*')
 
 # Readiness gates called from both units' ExecStartPre=. Outside etc/, so it is
@@ -153,24 +192,48 @@ as_root install -D -o root -g root -m 0755 \
   etc/NetworkManager/dispatcher.d/90-dns-mesh-coexist \
   /etc/NetworkManager/dispatcher.d/90-dns-mesh-coexist
 
-# Stamp this node's ULA address and its default route into the installed copy
-# of 25-bat0.network. Done to a temp copy, never in place: an in-place sed
+# Stamp this node's addresses, default routes and resolver into the installed
+# copy of 25-bat0.network. Done to a temp copy, never in place: an in-place sed
 # dirties the working tree and bakes one node's address into the repo, which
 # then travels to the next node as its apparent default.
 #
-# An empty GATEWAY_ADDR deletes the Gateway= line rather than writing a blank
-# one, which networkd rejects as a parse error -- taking the whole .network
-# file down with it, address included, over a route that was meant to be
-# optional.
+# Each value has a named placeholder in the template rather than being matched
+# by keyword. `s|^Address=.*|` was fine while there was one address; with two it
+# would stamp the v6 value onto both lines. Placeholders also mean an unstamped
+# file fails loudly at networkd rather than quietly carrying a stale literal.
+#
+# A missing value deletes its line rather than writing a blank one, which
+# networkd rejects as a parse error -- taking the whole .network file down with
+# it, addresses included, over a route that was meant to be optional.
+stamp_or_drop() {
+  local key="${1:?}" placeholder="${2:?}" value="${3-}"
+  if [[ -n $value ]]; then
+    sed -i -E "s|^${key}=${placeholder}\$|${key}=${value}|" "$STAMPED"
+  else
+    sed -i -E "/^${key}=${placeholder}\$/d" "$STAMPED"
+  fi
+}
+
 STAMPED=$(mktemp)
 trap 'rm -f "$STAMPED"' EXIT
-sed -E "s|^Address=.*|Address=${IPV6_ADDR}|" \
-  etc/systemd/network/25-bat0.network >"$STAMPED"
-if [[ -n $GATEWAY_ADDR ]]; then
-  sed -i -E "s|^Gateway=.*|Gateway=${GATEWAY_ADDR}|" "$STAMPED"
-else
-  sed -i -E "/^Gateway=/d" "$STAMPED"
+cp etc/systemd/network/25-bat0.network "$STAMPED"
+
+stamp_or_drop Address IPV6_ADDRESS_PLACEHOLDER "$IPV6_ADDR"
+stamp_or_drop Address IPV4_ADDRESS_PLACEHOLDER "$IPV4_ADDR"
+stamp_or_drop Gateway IPV6_GATEWAY_PLACEHOLDER "$GATEWAY_ADDR"
+stamp_or_drop Gateway IPV4_GATEWAY_PLACEHOLDER "$GATEWAY4_ADDR"
+# The resolver is the router's dnsmasq, which is the v4 gateway. No gateway
+# means no resolver to name; .local over mDNS and .mesh out of /etc/hosts carry
+# node-to-node naming without it.
+stamp_or_drop DNS IPV4_DNS_PLACEHOLDER "$GATEWAY4_ADDR"
+
+# Nothing may reach a node carrying an unstamped placeholder: networkd drops the
+# entire file on the first bad value, so the node would come up with no mesh
+# address at all. Cheaper to fail here, next to the terminal that can fix it.
+if grep -q 'PLACEHOLDER' "$STAMPED"; then
+  die "unstamped placeholder left in 25-bat0.network: $(grep 'PLACEHOLDER' "$STAMPED" | tr '\n' ' ')"
 fi
+
 as_root install -D -o root -g root -m 0644 \
   "$STAMPED" /etc/systemd/network/25-bat0.network
 

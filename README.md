@@ -82,41 +82,76 @@ ip -d link show halow0       # master bat0? type ibss?
 Needing to restart `halow0-attach` *separately* now means something is wrong
 beyond the boot races described under Design Notes.
 
-### Testing the Uplink: There Is No IPv4 on the Mesh
+### The Mesh Is Dual Stack
 
-`ping 8.8.8.8` will **never** work from a Jetson, no matter how healthy the
-uplink is.
-`bat0` is IPv6 ULA only -- there is no IPv4 address on it, so there is no
-source address to send a v4 packet from.
-The reply is `connect: Network is unreachable`,
-which reads exactly like a broken mesh and is not one.
+`bat0` carries two static addresses, and which one you use decides what you are
+actually testing:
 
-Reach for the same resolvers by their IPv6 addresses instead:
+| Family | Address | What it is for |
+| --- | --- | --- |
+| IPv6 ULA | `fdc7:37f3:e24a:0::/64`, EUI-64 per node | the mesh's own addressing; works with no router present |
+| IPv4 | `192.168.12.0/24`, roster position per node | the way out, and the way in from a laptop |
+
+**The mesh was IPv6-only until the uplink was measured.** That design assumed
+the router had a v6 uplink to masquerade onto. It does not -- `eth0` there takes
+a v4 DHCP lease and a link-local, with no global v6 and no v6 default route, so
+an IPv6-only mesh has no path off the router whatever batman and the firewall
+do. The v6 half is still the mesh's own layer and still what `.mesh` names
+resolve to; v4 is what reaches the internet and what a laptop on the router's
+WiFi can talk to.
+
+The v4 addresses land on the router's LAN because that is where `bat0` already
+is: the router bridges it into `br-ahwlan` alongside `eth1` and both SoC APs,
+so every node is L2-adjacent to that `/24`. Host octets come from roster
+position (`node_mesh_addr4`), starting at `.11` and bounded below `.100` so they
+cannot collide with the dnsmasq pool that serves the laptops.
+
+Test the uplink over v4, which is the family that has one:
 
 ```sh
-ping6 2606:4700:4700::1111  # Cloudflare, the 1.1.1.1 you meant
-ping6 2001:4860:4860::8888  # Google, the 8.8.8.8 you meant
-ping6 -I bat0 2606:4700:4700::1111 # force it over the mesh, not eth0
+ping -I bat0 1.1.1.1        # Cloudflare
+ping -I bat0 192.168.12.1   # just the router, if that fails
 ```
 
-Use the `-I bat0` form when the node also has Ethernet or WiFi up.
+Use the `-I bat0` form whenever the node also has Ethernet or WiFi up.
 Without it a working reply may have gone out the other interface entirely,
 which tests nothing about the mesh.
 
-If those fail, work down the layers rather than guessing:
+`ping6 2606:4700:4700::1111` still fails from a Jetson, and is **not** a broken
+mesh -- there is no v6 uplink for it to cross. `ping6 <node>.mesh` between
+Jetsons is the v6 test that should pass.
+
+If the uplink test fails, work down the layers rather than guessing:
 
 ```sh
-ip -6 route show default    # expect: default via <heylo-base's ULA> dev bat0
+ip -4 route show default    # expect: default via 192.168.12.1 dev bat0
+ping -I bat0 192.168.12.1   # the router itself, over the mesh
+batctl o                    # expect the router as an originator
 batctl gwl                  # expect the router listed, with a => on the selected one
-ping6 heylo-base.mesh       # the gateway itself, over the mesh
 resolvectl query one.one.one.one # DNS, once the above pass
 ```
 
-A default route with an empty `batctl gwl` means the mesh is up
-but the router is not announcing as a gateway.
-`heylo-base.mesh` answering while the resolvers do not
-puts the fault on the router's WAN side --
-firewall zone or NAT66, see [docs/OPENWRT.md](docs/OPENWRT.md).
+A default route with an empty `batctl o` means `bat0` on the router has lost its
+hard interface -- `batctl meshif bat0 interface add wlan0` there, and see
+[docs/OPENWRT.md](docs/OPENWRT.md) for why `rc.local` loses that race.
+The router answering while the internet does not puts the fault on its WAN
+side: the `ahwlan` firewall zone or `masq`.
+
+### Getting a Laptop to a Node
+
+A laptop on the router's `haylo-wifi` (2.4 GHz) or `heylo-wifi` (5 GHz) gets a
+dnsmasq lease on `192.168.12.0/24` -- the same `/24` the nodes are on, one
+bridge away. So SSH needs no jump host and no route:
+
+```sh
+ssh <node>@192.168.12.13    # ragnarhorn, per the roster
+ssh <node>@<node>.local     # or by name, mDNS over the same link
+```
+
+This works because the router bridges `bat0` into `br-ahwlan`. The cost of that
+bridge is real and is paid on the radio: every LAN broadcast and multicast frame
+-- ARP, mDNS, SSDP -- floods into a 1 MHz channel carrying a few hundred kbit/s.
+Measure it (`batman_oracle.sh tp`) before assuming it is free.
 
 ### DNS on the Bench: Mesh Down, Ethernet Up
 
