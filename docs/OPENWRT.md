@@ -140,15 +140,40 @@ The v4 host octets start at `.11` and are bounded below `.100`
 so a node can never collide with a laptop's lease.
 See `node_mesh_addr4` in `halow-lib.sh`.
 
-The router's own v6 ULA is added by the init script.
-**It sits on `bat0`, which is a bridge port**,
-and a bridge port does not normally terminate L3 -- frames go to the bridge,
-which delivers to the local stack only on its own MAC.
-So that address may never answer.
-It has not been tested, and nothing depends on it now that v4 carries the uplink.
-If you want v6 routing to the router to work,
-move it to `br-ahwlan` via `uci set network.ahwlan.ip6addr=...` rather than the script's
-`ip -6 addr add`.
+### The Router's ULA Goes on `br-ahwlan`, Not `bat0`
+
+It was on `bat0`, and **it never answered**.
+
+A bridge port does not terminate L3.
+Frames arriving on it are handed to the bridge,
+which delivers to the local stack only on the bridge's own MAC
+(`94:83:c4:89:3c:e3`), not the port's.
+So the address existed, `ip addr` showed it, `ip -6 route` showed
+`fdc7:37f3:e24a::/64 dev bat0`, and every ping to it was lost:
+
+```text
+3 packets transmitted, 0 packets received, 100% packet loss
+```
+
+Moving it to `br-ahwlan` made it answer on the first try, ~7-9 ms over the mesh.
+This is what the Jetsons' `Gateway=` in `25-bat0.network` points at,
+so it had been aimed at a dead address for as long as it existed --
+invisible, because v4 carries the uplink and nothing else depended on it.
+
+It belongs in UCI, not in `halow-mesh`:
+`br-ahwlan` is netifd's interface, and an address added behind netifd's back is
+wiped by the next `ifup ahwlan` or network restart --
+a fault that surfaces hours later with no obvious cause.
+
+```sh
+uci set network.ahwlan.ip6addr='fdc7:37f3:e24a:0:0ebf:74ff:fe00:3757/64'
+uci commit network
+/etc/init.d/network restart
+```
+
+The general lesson is worth keeping separate from this instance:
+**an IP on a bridge port is almost always a mistake.**
+It fails silently and every diagnostic short of an actual packet says it is fine.
 
 ## The Bridge
 
@@ -248,7 +273,7 @@ Two files in `router/` replace that block:
 
 | File | Job |
 | --- | --- |
-| `etc/init.d/halow-mesh` | wait for `wlan0` and the bridge, set MTU, attach, `gw_mode server`, bridge and address `bat0` |
+| `etc/init.d/halow-mesh` | wait for `wlan0` and the bridge, set MTU, attach, `gw_mode server`, bridge `bat0` |
 | `etc/hotplug.d/net/30-halow-mesh` | re-run the above whenever `wlan0` reappears |
 
 ```sh
@@ -550,8 +575,9 @@ Bridged `bat0` traffic arrives on `br-ahwlan` and matches `ahwlan`.
 
 - The broadcast cost of the bridge, unmeasured. `batman_oracle.sh tp` with and
   without laptops on the APs.
-- Whether the router's v6 ULA on a bridge port answers at all, and whether
-  anything should depend on it.
+- Whether anything should depend on the router's v6 ULA now that it answers.
+  The Jetsons' `Gateway=` points at it, but v4 carries the uplink and the v6
+  default route has no v6 upstream to reach.
 - Whether an IGMP/MLD querier on `br-ahwlan` would let batman re-enable
   multicast optimisation, and what that is worth on a 1 MHz link.
 - Which Morse driver/firmware pair the kit image shipped with, against what the

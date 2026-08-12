@@ -36,12 +36,6 @@ IFACE=wlan0
 BRIDGE=br-ahwlan
 MESH_IF=bat0
 
-# This router's mesh address. EUI-64 from the radio MAC against the fleet
-# prefix, i.e. the same value install_network_stack.sh derives for heylo-base on
-# the Jetson side. Written down here rather than derived because the router has
-# no copy of the roster; if ULA_PREFIX ever changes, this changes with it.
-MESH_ADDR=fdc7:37f3:e24a:0:0ebf:74ff:fe00:3757/64
-
 # 1500 + the 32-byte batman-adv header. Anything less and every full-size frame
 # is fragmented at layer 2 on the slowest link in the system.
 HARDIF_MTU=1532
@@ -137,8 +131,19 @@ start() {
 	ip link set dev "$MESH_IF" master "$BRIDGE"
 	ip link set "$MESH_IF" up
 
-	# Already-present is the normal case on a re-run, not a fault.
-	ip -6 addr add dev "$MESH_IF" "$MESH_ADDR" 2>/dev/null
+	# The router's mesh ULA is NOT set here. It lives on $BRIDGE, via
+	# network.ahwlan.ip6addr in UCI -- see docs/OPENWRT.md.
+	#
+	# It was on $MESH_IF, and it never answered. A bridge port does not
+	# terminate L3: frames arriving on it go to the bridge, which delivers to
+	# the local stack only on the bridge's own MAC, not the port's. So the
+	# address existed, `ip addr` showed it, the route was right, and every ping
+	# to it was lost. Moving it to $BRIDGE made it answer on the first try.
+	#
+	# It belongs in UCI rather than here because $BRIDGE is netifd's interface:
+	# an address added behind netifd's back is wiped by the next `ifup ahwlan`
+	# or network restart, which is a fault that appears hours later with no
+	# obvious cause.
 
 	say "up: $IFACE -> $MESH_IF -> $BRIDGE"
 	rmdir "$LOCK" 2>/dev/null
