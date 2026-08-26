@@ -14,6 +14,7 @@ Both run on the node, with the radio plugged in; nothing cross-compiles.
 | [docs/OPENWRT.md](docs/OPENWRT.md) | the router: bridge, firewall, uplink, radio parameters |
 | [docs/MONITORING.md](docs/MONITORING.md) | `batman_oracle.sh`, measurement method, output schemas |
 | [docs/HTTP_COMMS.md](docs/HTTP_COMMS.md) | writing services that talk between nodes |
+| [docs/MANET_JOBS.md](docs/MANET_JOBS.md) | foreground asynchronous NumPy jobs between `ragnarhorn` and `olo` |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | symptoms, and what each has turned out to be |
 
 ## Setup
