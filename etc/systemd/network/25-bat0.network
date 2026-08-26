@@ -67,6 +67,12 @@ Gateway=IPV4_GATEWAY_PLACEHOLDER
 #   DNS=2606:4700:4700::1111
 DNS=IPV4_DNS_PLACEHOLDER
 
+# Eligible to answer public names, without the Domains=~. below. Without this
+# resolved leaves the link -DefaultRoute, so DNS= above is consulted for nothing
+# but names under a matching domain, and a node whose only uplink is the mesh
+# has no public DNS even with the router up and healthy.
+DNSDefaultRoute=yes
+
 # No Domains=~. here. It would hand this link a resolver monopoly, and with the
 # mesh down every lookup would go to an unreachable router to die rather than to
 # a healthy bench uplink sitting right beside it. See the DNS coexistence notes
