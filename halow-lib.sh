@@ -232,34 +232,40 @@ node_mesh_addr() {
   printf '%s:%s' "$prefix" "$(eui64_from_mac "$mac")"
 }
 
-# node_mesh_addr4 <name> <bat_hosts> <subnet> <base> -- a node's IPv4 address on
-# the mesh, derived from its POSITION in the roster rather than from its MAC.
+# node_mesh_addr4 <name> <bat_hosts> <subnet> -- a node's IPv4 address on the
+# mesh, looked up from its roster row rather than from its MAC.
 #
-# Position, not EUI-64, because the two families have nothing like the same room
-# to work in. The mesh shares one L2 broadcast domain with the router's LAN --
-# bat0 is a bridge port of br-ahwlan there -- so these addresses have to fit
-# inside a /24 that dnsmasq is also leasing out of. Eight host bits cannot
-# absorb a MAC without collisions; roster position is collision-free by
-# construction, for exactly as long as the roster itself is.
+# Not EUI-64, because the two families have nothing like the same room to work
+# in. The mesh shares one L2 broadcast domain with the router's LAN -- bat0 is
+# a bridge port of br-ahwlan there -- so these addresses have to fit inside a
+# /24 that dnsmasq is also leasing out of. Eight host bits cannot absorb a MAC
+# without collisions.
 #
-# Host octets run <base>+1 upwards. They must stay clear of the router (.1) and
-# below dnsmasq's pool start (.100), which is what <base> and the roster length
-# are checked against here rather than left to be discovered as a duplicate
-# address in the field.
+# Not roster POSITION either, even though that was collision-free by
+# construction: it was not stable under insertion. Adding a node anywhere but
+# the end of the roster shifted every index below it, and every one of those
+# nodes then needed a fleet-wide reinstall to pick up its new address. An
+# explicit third column ties the octet to the node's NAME instead, so the
+# roster can grow anywhere without moving anyone else.
+#
+# Host octets must stay clear of the router (.1) and below dnsmasq's pool
+# start (.100), which is checked against the column value here rather than
+# left to be discovered as a duplicate address in the field. A missing or
+# non-numeric column is refused the same way.
 node_mesh_addr4() {
   local name="${1?missing \'name\' argument, aborting}"
   local bat_hosts="${2?missing \'bat_hosts\' argument, aborting}"
   local subnet="${3?missing \'subnet\' argument, aborting}"
-  local base="${4?missing \'base\' argument, aborting}"
-  local idx octet
+  local octet
   [[ -f $bat_hosts ]] || return 0
-  idx=$(awk -v n="$name" '
+  octet=$(awk -v n="$name" '
     /^[[:space:]]*(#|$)/ {next}
-    { sub(/\.lan$/, "", $2); i++; if ($2 == n) { print i; exit } }' "$bat_hosts")
-  [[ -n $idx ]] || return 0
-  octet=$((base + idx))
+    { sub(/\.lan$/, "", $2); if ($2 == n) { print $3; exit } }' "$bat_hosts")
   # Refuse rather than wrap or collide: a silently bad address here is a
-  # duplicate-IP fault on a node nobody can reach.
+  # duplicate-IP fault on a node nobody can reach. That covers an absent
+  # column (a roster row not yet updated to the three-column format) and a
+  # non-integer column (a typo) as well as an out-of-range one.
+  [[ $octet =~ ^[0-9]+$ ]] || return 0
   ((octet > 1 && octet < 100)) || return 0
   printf '%s.%d' "$subnet" "$octet"
 }
@@ -769,10 +775,14 @@ HOSTS_END="# END halow-batman"
 hosts_block() {
   local bat_hosts="${1?missing \'bat_hosts\' argument, aborting}"
   local prefix="${2?missing \'ula_prefix\' argument, aborting}"
-  local mac name
+  local mac name octet
 
   echo "$HOSTS_BEGIN"
-  while read -r mac name; do
+  # octet is bat-hosts's third column (the v4 host octet, unused here since
+  # this block is v6-only) -- named and read explicitly rather than left off
+  # the read, or bash folds it into $name along with the rest of the line and
+  # every entry below comes out as "<name> <octet>.mesh".
+  while read -r mac name octet; do
     # Tolerate a .lan suffix left in a node's hand-edited bat-hosts from the
     # retired IPv4 scheme; the shipped table no longer carries one.
     name=${name%.lan}

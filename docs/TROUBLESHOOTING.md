@@ -220,11 +220,12 @@ See [HTTP_COMMS.md](HTTP_COMMS.md).
 The roster is applied at install time.
 Rerun `./install_network_stack.sh` on the other nodes.
 
-If the new entry was *inserted* rather than appended, the damage is wider:
-`node_mesh_addr4` derives each node's IPv4 host octet from its line position,
-so every node below the insertion point has silently been renumbered
-and needs reinstalling.
-The IPv6 half is derived from the MAC and is unaffected.
+The new node's IPv4 host octet is an explicit column, not derived from line
+position, so inserting it anywhere in the file does not renumber any existing
+node.
+The only thing to get right is the octet itself: it must not already be taken
+by another node in the roster, or the two nodes silently collide on the same
+address.
 
 ---
 

@@ -84,7 +84,7 @@ If any of it fails, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 | Family | Address | Role |
 | --- | --- | --- |
 | IPv6 ULA | `fdc7:37f3:e24a:0::/64`, EUI-64 from the radio MAC | the mesh's own layer; works with no router present |
-| IPv4 | `192.168.12.0/24`, host octet from roster position | the way out to the internet, and the way in from a laptop |
+| IPv4 | `192.168.12.0/24`, host octet from the roster's explicit column | the way out to the internet, and the way in from a laptop |
 
 Both are stamped into `etc/systemd/network/25-bat0.network` by
 `install_network_stack.sh`.
@@ -92,9 +92,9 @@ Both are stamped into `etc/systemd/network/25-bat0.network` by
 The v4 addresses sit on the router's LAN because that is where `bat0` already is:
 the router bridges it into `br-ahwlan` alongside `eth1` and both SoC APs,
 so every node is L2-adjacent to that `/24`.
-Host octets come from roster position (`node_mesh_addr4`),
-starting at `.11` and bounded below `.100` so they cannot collide with the dnsmasq pool
-that serves the laptops.
+Host octets come from an explicit column in the roster (`node_mesh_addr4`),
+bounded above `.1` and below `.100` so they cannot collide with the router or the dnsmasq
+pool that serves the laptops.
 
 IPv4 is what reaches the internet, because the router's uplink has no IPv6:
 `eth0` there takes a v4 DHCP lease and a link-local,
@@ -131,16 +131,17 @@ hundred kbit/s, so keep clients off the APs during a measurement run.
 
 ## Fleet Configuration
 
-The one file to edit is `etc/bat-hosts`: one line per node, radio MAC to name.
+The one file to edit is `etc/bat-hosts`: one line per node, radio MAC to name to
+IPv4 host octet.
 Hostname, the `<name>.mesh` address,
-the IPv4 host octet and the static entries merged into `/etc/hosts` all follow from it.
-Add a node by appending a line, then rerun `./install_network_stack.sh` everywhere.
+the IPv4 address and the static entries merged into `/etc/hosts` all follow from it.
+Add a node by appending a line with an unused octet, then rerun `./install_network_stack.sh`
+everywhere.
 
-Append, do not insert.
-`node_mesh_addr4` derives the IPv4 host octet from a node's line position in the roster,
-so putting a new entry anywhere but the end renumbers every node below it,
-and they will not know until they are reinstalled.
-The IPv6 half is derived from the MAC and is unaffected.
+The IPv4 host octet is an explicit column, not derived from line position, so a new
+entry can go anywhere in the file without renumbering any existing node -- the only
+rule is that its octet must not already be taken.
+The IPv6 half is derived from the MAC and is unaffected either way.
 
 IPv6 addresses are a shared `/64` prefix plus an EUI-64 suffix derived from each radio's
 MAC.
@@ -165,8 +166,8 @@ and the mesh route carries traffic only when it is the last default standing.
 There is no IPv6 default route: the router has no v6 uplink to forward onto, so
 everything the mesh reaches over v6 is already on-link instead.
 
-`NODE_NAME`, `ULA_PREFIX`, `GATEWAY_NAME`, `MESH_V4_SUBNET`,
-`MESH_V4_BASE` and `MESH_V4_GATEWAY` can all be exported to override the derived values.
+`NODE_NAME`, `ULA_PREFIX`, `GATEWAY_NAME`, `MESH_V4_SUBNET`
+and `MESH_V4_GATEWAY` can all be exported to override the derived values.
 Setting `GATEWAY_NAME` empty installs no default route
 and no chrony time source at all,
 which is what you want on an isolated bench pair.

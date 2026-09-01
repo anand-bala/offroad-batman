@@ -62,7 +62,7 @@ Read this section and the rest is detail.
 | mesh device | `bat0`, a bridge port of `br-ahwlan` |
 | LAN / mesh v4 | `192.168.12.0/24`, router at `.1` |
 | DHCP pool | `.100`-`.249` (laptops) |
-| Jetson v4 | `.11` upward, static, from roster position |
+| Jetson v4 | `.11` upward, static, from the roster's explicit octet column |
 | mesh v6 ULA | `fdc7:37f3:e24a::/64`, router at `...:0ebf:74ff:fe00:3757` on `br-ahwlan` |
 | uplink | `eth0`, DHCP, IPv4 only in practice |
 | batman | 2023.1-openwrt-7, `BATMAN_IV`, `gw_mode server` |
@@ -115,7 +115,7 @@ default via 192.168.1.1 dev eth0
 The mesh is therefore dual stack.
 The IPv6 ULA, EUI-64 from each radio's MAC,
 is the mesh's own layer and works with no router present.
-The IPv4, on `192.168.12.0/24` from roster position,
+The IPv4, on `192.168.12.0/24` from the roster's explicit octet column,
 is the way out and the way in from a laptop.
 Both are stamped into `25-bat0.network` by `install_network_stack.sh`;
 v4 host octets start at `.11` and stay below `.100`

@@ -93,22 +93,18 @@ IPV6_ADDR="${ULA_PREFIX}:$(eui64_identifier "$RADIO")/64"
 # router side. MESH_V4_GATEWAY is the router's own address on it, and is written
 # down rather than derived -- it belongs to br-ahwlan, which is UCI's to set and
 # has no roster entry to derive from.
-#
-# MESH_V4_BASE offsets node addresses away from .1 and keeps them below the
-# dnsmasq pool that starts at .100, so a node can never be handed an address a
-# laptop already holds. See node_mesh_addr4, which enforces both bounds.
 : "${MESH_V4_SUBNET:=192.168.12}"
-: "${MESH_V4_BASE:=10}"
 : "${MESH_V4_GATEWAY:=${MESH_V4_SUBNET}.1}"
 
-# This node's static IPv4 on that LAN, from its roster position. Empty when the
-# node is absent from the roster or the roster has outgrown the usable octets,
-# in which case the mesh still comes up v6-only -- degraded, but not broken.
-IPV4_ADDR=$(node_mesh_addr4 "$NODE_NAME" ./etc/bat-hosts "$MESH_V4_SUBNET" "$MESH_V4_BASE")
+# This node's static IPv4 on that LAN, from its roster row's explicit octet
+# column. Empty when the node is absent from the roster or its octet column
+# is missing or out of range, in which case the mesh still comes up
+# v6-only -- degraded, but not broken.
+IPV4_ADDR=$(node_mesh_addr4 "$NODE_NAME" ./etc/bat-hosts "$MESH_V4_SUBNET")
 if [[ -n $IPV4_ADDR ]]; then
   IPV4_ADDR="${IPV4_ADDR}/24"
 else
-  warn "no IPv4 for '${NODE_NAME}': absent from etc/bat-hosts, or past the usable range"
+  warn "no IPv4 for '${NODE_NAME}': absent from etc/bat-hosts, or its octet column is missing or out of range"
   warn "this node will be IPv6-only, and the v4-only uplink will be unreachable from it"
 fi
 
