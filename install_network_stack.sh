@@ -338,8 +338,11 @@ fi
 # quietly re-enable it on a node in the field.
 as_root systemctl mask --now systemd-timesyncd.service 2>/dev/null || true
 
-# Hostname (drives <hostname>.local).
-# TODO: I feel like we should actually prefer the already set hostname on the device.
+# Hostname (drives <hostname>.local). Still needed on a first install, where
+# NODE_NAME came from the roster lookup and the hostname has not been set to
+# it yet. On a re-run node_name now prefers an already-set hostname that is
+# itself in the roster (see node_name in halow-lib.sh), so NODE_NAME already
+# equals the current hostname and this call is a no-op.
 as_root hostnamectl set-hostname "$NODE_NAME"
 
 # Normalise NSS to route .local through systemd-resolved (matches mdns.conf),

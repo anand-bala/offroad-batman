@@ -17,9 +17,10 @@
 #   sampling   read link quality out of iw/batctl/morse_cli
 #   hosts      the /etc/hosts block derived from the node roster
 #
-# Identity comes from the radio MAC looked up in bat-hosts, so the same files
-# ship to every node unchanged and nothing has to be edited per device. Falls
-# back to the system hostname, then to whatever the caller defaulted to.
+# Identity is hostname-led, with the radio MAC as a fallback for a node that
+# has not been named yet. Either way the same files ship to every node
+# unchanged and nothing has to be edited per device: see node_name for why the
+# hostname now outranks the MAC lookup it used to defer to.
 #
 # Addresses are then derived, not stored: the fleet-wide ULA prefix plus an
 # EUI-64 suffix from each radio's MAC. One table drives the whole roster.
@@ -144,16 +145,62 @@ iface_mac() {
 
 # node_name <iface> [<bat_hosts_file>] -- this node's name.
 #
-# Precedence: an explicit $NODE_NAME env override, then a lookup of iface's
-# MAC in bat_hosts (if given), then whatever hostname is already set.
+# Precedence:
+#   1. An explicit $NODE_NAME env override. Always wins.
+#   2. The system hostname, IF that hostname is already a name in the roster.
+#   3. A lookup of iface's MAC in bat_hosts (if given), as a fallback for a
+#      node that has not been named yet.
+#   4. The system hostname as-is, whatever it is.
+#
+# Identity used to come from the radio MAC alone (step 3, unconditionally
+# first), which makes identity a property of the RADIO CARD rather than the
+# MACHINE. That went wrong twice in the field: a HaLow chip replaced after a
+# crash carried a MAC absent from the roster, so the fleet needed a roster
+# update just to keep running -- and worse, a chip reused or swapped between
+# nodes carries a MAC that IS in the roster, just under someone else's name,
+# so the node would silently adopt that other node's identity and, with it,
+# its IPv4 octet: a duplicate-address fault with no error anywhere to find it.
+# Identity belongs to the machine, not whichever card happens to be plugged
+# into it, so the hostname now wins over the MAC when it can.
+#
+# Step 2 is gated on roster membership rather than preferring the hostname
+# unconditionally, because a factory Jetson ships with a hostname like
+# `ubuntu` or `nvidia-desktop`, and the installer's whole job on a node's
+# FIRST run is to set the hostname FROM the roster (see the
+# hostnamectl set-hostname call in install_network_stack.sh). Preferring the
+# hostname outright would make that first run permanent: the node would name
+# itself `ubuntu` forever, with the MAC lookup that was supposed to fix that
+# never consulted. Requiring the hostname to already be a roster name gets
+# every case right:
+#   - chip swapped, hostname already `drone`, `drone` in the roster -> stays
+#     `drone`, the MAC is never consulted, no roster edit needed.
+#   - first install, hostname `ubuntu`, not in the roster -> falls through to
+#     the MAC lookup and gets its proper name, same as before this change.
+#   - chip reused from another node, its MAC in the roster under a different
+#     name -> the hostname wins, so the node keeps its own identity instead of
+#     silently adopting the other node's.
+#   - node named nothing useful and its MAC in no roster -> hostname as-is,
+#     degraded exactly as before.
 node_name() {
   local iface="${1?missing \'iface\' argument, aborting}"
   local bat_hosts="${2:-}"
-  local mac name
+  local mac name host
 
   if [[ -n ${NODE_NAME:-} ]]; then
     printf '%s' "$NODE_NAME"
     return 0
+  fi
+
+  host=$(hostname 2>/dev/null || true)
+
+  if [[ -n $host && -f $bat_hosts ]]; then
+    if awk -v h="$host" '
+      /^[[:space:]]*(#|$)/ {next}
+      { n = $2; sub(/\.lan$/, "", n); if (n == h) { found = 1; exit } }
+      END { exit !found }' "$bat_hosts"; then
+      printf '%s' "$host"
+      return 0
+    fi
   fi
 
   mac=$(iface_mac "$iface")
@@ -168,7 +215,7 @@ node_name() {
     fi
   fi
 
-  hostname 2>/dev/null || true
+  printf '%s' "$host"
 }
 
 # eui64_from_mac <mac> -- the EUI-64 interface identifier for a MAC.
