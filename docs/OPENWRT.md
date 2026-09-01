@@ -138,7 +138,9 @@ It is in UCI and not in `halow-mesh`, because `br-ahwlan` is netifd's interface,
 and an address added behind netifd's back is wiped by the next `ifup ahwlan`
 or network restart.
 
-This is the address the Jetsons' `Gateway=` in `25-bat0.network` points at.
+This is the router's address on `br-ahwlan`, and the chrony time source the Jetsons'
+`GATEWAY_ADDR` points at. It no longer backs a v6 default route: everything else the
+Jetsons reach over v6 is already on-link (see the Open Questions entry below).
 
 ## The Bridge
 
@@ -282,8 +284,10 @@ so the election happens, `batctl gwl` fills in, and no route is ever created.
 
 It is still worth setting.
 `batctl gwl` on a Jetson tells you that node can see the uplink.
-The route itself is `Gateway=` in `25-bat0.network`,
-stamped per node by `install_network_stack.sh`.
+The route itself is the IPv4 `Gateway=` in `25-bat0.network`,
+stamped per node by `install_network_stack.sh`. There is no IPv6 equivalent:
+the router has no v6 uplink to forward onto, so a v6 default route here would
+have nowhere to go.
 
 ## Wireless
 
@@ -409,8 +413,9 @@ which is wrong for this fleet and fails validation rather than warning.
 - The broadcast cost of the bridge, unmeasured. `batman_oracle.sh tp` with and
   without laptops on the APs.
 - Whether anything should depend on the router's v6 ULA.
-  The Jetsons' `Gateway=` points at it,
-  but v4 carries the uplink and the v6 default route has no v6 upstream to reach.
+  The Jetsons' chrony time source points at it,
+  but the v6 default route that used to point at it has been removed:
+  v4 carries the uplink, and a v6 default route would have had no v6 upstream to reach.
 - Whether an IGMP/MLD querier on `br-ahwlan` would let batman re-enable
   multicast optimisation, and what that is worth on a 1 MHz link.
 - Which Morse driver/firmware pair the kit image shipped with, against what the

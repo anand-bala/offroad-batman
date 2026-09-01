@@ -4,10 +4,13 @@
 #
 #   IPv6 ULA   fleet-wide /64 plus a per-node EUI-64 suffix. The mesh's own
 #              addressing, and the only half that works with no router present.
+#              No default route in this family: see the note above the v4
+#              [Route] block below for why.
 #   IPv4       a host address on the router's LAN /24. The mesh is bridged into
 #              that LAN on the router (bat0 is a port of br-ahwlan), so a Jetson
 #              is L2-adjacent to everything on it: the uplink out, and the
-#              laptops on the 2.4/5 GHz APs coming the other way.
+#              laptops on the 2.4/5 GHz APs coming the other way. This is also
+#              the only family carrying a default route out of the mesh.
 #
 # mDNS makes <hostname>.local resolvable peer-to-peer over both, so the actual
 # address value never has to be typed by a human.
@@ -66,29 +69,35 @@ DNSDefaultRoute=yes
 # a healthy bench uplink sitting right beside it. See the DNS coexistence notes
 # in install_network_stack.sh for the history.
 
-# The uplink, in both families. Stamped from the roster entry named by
-# $GATEWAY_NAME so they track a ULA_PREFIX override instead of drifting from it.
-# IPv6AcceptRA=no and DHCP=no above mean nothing else will ever install a
-# default route on this link -- without these routes the mesh has no way out,
-# which is exactly the "Network is unreachable" that sent us looking.
+# The uplink, IPv4 only. Gated on $GATEWAY_NAME being set to a node other than
+# this one, but the address itself is not roster-derived: it is MESH_V4_GATEWAY,
+# a written-down literal (default 192.168.12.1, override by exporting
+# MESH_V4_GATEWAY) rather than an EUI-64 lookup, because it is the router's own
+# address on br-ahwlan, which UCI sets and which has no roster entry to derive
+# from. DHCP=no above means nothing else will ever install a default route on
+# this link -- without this route the mesh has no way out, which is exactly the
+# "Network is unreachable" that sent us looking.
 #
-# Neither is conditional on the router being up: a default route pointing at an
+# Not conditional on the router being up: a default route pointing at an
 # absent gateway costs nothing, and batman reconverges on its own when it
-# returns. Node-to-node traffic never consults them.
+# returns. Node-to-node traffic never consults it.
 #
-# [Route] blocks with an explicit Metric, not Gateway= lines in [Network]: a
+# A [Route] block with an explicit Metric, not a Gateway= line in [Network]: a
 # plain v4 gateway line takes the kernel default metric 0, which outranks
 # every DHCP route a bench uplink can offer. With the mesh down, that sent all
 # IPv4 into bat0 to die -- DNS still answering (the resolver is on-link) while
-# every connection failed with "No route to host". The v6 twin only dodged
-# this because v6 static routes default to metric 1024. 4096 loses to any
-# real uplink and is the only default left when there is none, which is the
-# same coexistence rule the DNS stamps follow: the mesh carries the traffic
-# when it is the only path that can.
-[Route]
-Gateway=IPV6_GATEWAY_PLACEHOLDER
-Metric=4096
-
+# every connection failed with "No route to host". 4096 loses to any real
+# uplink and is the only default left when there is none, which is the same
+# coexistence rule the DNS stamps follow: the mesh carries the traffic when it
+# is the only path that can.
+#
+# There is no equivalent [Route] block for IPv6. The router's own uplink
+# (eth0) has no v6 default route of its own -- no global address, no RA, no
+# path off the router in that family -- so a v6 default route on the mesh side
+# would point at a gateway that itself has nowhere to forward the packet.
+# Everything a Jetson can actually reach over v6 is already on-link: nodes
+# carry the shared /64 directly, and bat0 is a bridged port of br-ahwlan, so
+# router and laptops alike are reachable without a default route at all.
 [Route]
 Gateway=IPV4_GATEWAY_PLACEHOLDER
 Metric=4096

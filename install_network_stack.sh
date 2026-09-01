@@ -120,27 +120,36 @@ fi
 
 # GATEWAY_ADDR -- the uplink's mesh address, derived rather than written down.
 #
+# No longer used as a route: the router has no v6 uplink to forward onto, so
+# a v6 default route pointing here would reach no further than the router
+# itself, and everything else reachable over v6 is already on-link. Its
+# remaining purpose is as the fleet's chrony time source (stamped into
+# etc/chrony/conf.d/halow-mesh.conf below), which still needs the gateway's
+# mesh address regardless of routing.
+#
 # Same derivation as every other node's: its radio MAC out of the roster,
 # EUI-64'd against the fleet prefix. Deriving it means a ULA_PREFIX override
 # moves the gateway with the fleet, where a literal address would silently
-# point at the old prefix and every node would lose its route out.
+# point at the old prefix and every node would lose track of its time source.
 #
-# Empty when this node IS the gateway (it does not route to itself), when
+# Empty when this node IS the gateway (it does not sync to itself), when
 # GATEWAY_NAME is cleared, or when the name is absent from the roster.
 GATEWAY_ADDR=""
 GATEWAY4_ADDR=""
 if [[ -n $GATEWAY_NAME && $GATEWAY_NAME != "$NODE_NAME" ]]; then
   GATEWAY_ADDR=$(node_mesh_addr "$GATEWAY_NAME" ./etc/bat-hosts "$ULA_PREFIX")
   if [[ -z $GATEWAY_ADDR ]]; then
-    # Not fatal: the mesh still works, this node just has no way out. Say so
-    # loudly rather than leaving it to be found by a failed ping in the field.
-    warn "gateway '$GATEWAY_NAME' not in etc/bat-hosts; no default route will be set"
+    # Not fatal: the mesh still works, this node just has no time source. Say
+    # so loudly rather than leaving it to be found by a failed sync in the
+    # field.
+    warn "gateway '$GATEWAY_NAME' not in etc/bat-hosts; no time source will be set"
   fi
   # The v4 gateway is not derived and so cannot go missing the same way. It is
-  # gated on the same condition only so that a node declared to be the gateway,
-  # or a bench pair with GATEWAY_NAME cleared, gets no default route in either
-  # family -- one stack routing to an absent router while the other does not is
-  # a worse state to debug than neither doing so.
+  # gated on the same condition only so that a node declared to be the
+  # gateway, or a bench pair with GATEWAY_NAME cleared, gets neither a v4
+  # default route nor a time source pointing at itself -- routing to an
+  # absent router while still trying to sync against it is a worse state to
+  # debug than neither doing so.
   GATEWAY4_ADDR="$MESH_V4_GATEWAY"
 fi
 
@@ -151,8 +160,8 @@ log "Setting up B.A.T.M.A.N. networking stack as follows:
   HaLow MAC Address:  ${MAC}
   IPv6 Address:       ${IPV6_ADDR}
   IPv4 Address:       ${IPV4_ADDR:-<none> (not in the roster, or past the usable range)}
-  Default Route:      ${GATEWAY_ADDR:-<none> (this node is the gateway, or none is configured)}
-  Default Route (v4): ${GATEWAY4_ADDR:-<none> (this node is the gateway, or none is configured)}
+  Default Route:      ${GATEWAY4_ADDR:-<none> (this node is the gateway, or none is configured)}
+  Time Source:        ${GATEWAY_ADDR:-<none> (this node is the gateway, or none is configured)}
 "
 
 # --------------------------------------------------------------------------------
@@ -192,7 +201,7 @@ as_root install -D -o root -g root -m 0755 \
   etc/NetworkManager/dispatcher.d/90-dns-mesh-coexist \
   /etc/NetworkManager/dispatcher.d/90-dns-mesh-coexist
 
-# Stamp this node's addresses, default routes and resolver into the installed
+# Stamp this node's addresses, default route and resolver into the installed
 # copy of 25-bat0.network. Done to a temp copy, never in place: an in-place sed
 # dirties the working tree and bakes one node's address into the repo, which
 # then travels to the next node as its apparent default.
@@ -234,7 +243,6 @@ cp etc/systemd/network/25-bat0.network "$STAMPED"
 
 stamp_or_drop Address IPV6_ADDRESS_PLACEHOLDER "$IPV6_ADDR"
 stamp_or_drop Address IPV4_ADDRESS_PLACEHOLDER "$IPV4_ADDR"
-stamp_or_drop_route IPV6_GATEWAY_PLACEHOLDER "$GATEWAY_ADDR"
 stamp_or_drop_route IPV4_GATEWAY_PLACEHOLDER "$GATEWAY4_ADDR"
 # The resolver is the router's dnsmasq, which is the v4 gateway. No gateway
 # means no resolver to name; .local over mDNS and .mesh out of /etc/hosts carry

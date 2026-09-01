@@ -159,13 +159,16 @@ so a bench uplink answers lookups whatever else is configured.
 `journalctl -t dns-mesh-coexist` shows the hook firing.
 
 The same rule holds at the default route.
-The mesh's gateways are stamped as `[Route]` blocks with `Metric=4096`,
+The mesh's IPv4 gateway is stamped as a `[Route]` block with `Metric=4096`,
 so a bench uplink's DHCP route (metric ~100) outranks the mesh
 and the mesh route carries traffic only when it is the last default standing.
+There is no IPv6 default route: the router has no v6 uplink to forward onto, so
+everything the mesh reaches over v6 is already on-link instead.
 
 `NODE_NAME`, `ULA_PREFIX`, `GATEWAY_NAME`, `MESH_V4_SUBNET`,
 `MESH_V4_BASE` and `MESH_V4_GATEWAY` can all be exported to override the derived values.
-Setting `GATEWAY_NAME` empty installs no default route at all,
+Setting `GATEWAY_NAME` empty installs no default route
+and no chrony time source at all,
 which is what you want on an isolated bench pair.
 
 Three open decisions live in `etc/wpa_supplicant/wpa_supplicant-halow0.conf`: open IBSS
